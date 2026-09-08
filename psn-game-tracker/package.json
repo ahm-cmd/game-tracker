@@ -1,0 +1,14 @@
+{
+  "name": "psn-game-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync": "node sync.js"
+  },
+  "dependencies": {
+    "psn-api": "^2.18.0",
+    "googleapis": "^140.0.0",
+    "howlongtobeat": "^1.8.0"
+  }
+}
