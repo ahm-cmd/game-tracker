@@ -9,6 +9,6 @@
   "dependencies": {
     "psn-api": "^2.18.0",
     "googleapis": "^140.0.0",
-    "howlongtobeat": "^1.8.0"
+    "howlongtobeat-core": "^1.0.0"
   }
 }
