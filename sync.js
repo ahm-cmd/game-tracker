@@ -10,17 +10,16 @@ import { google } from "googleapis";
 // ---- Config ----------------------------------------------------------------
 const SHEET_TAB = process.env.SHEET_TAB || "Games";
 
-// Cover art sizing. Mode 4 = force an exact pixel box (uniform shape).
-// Switch COVER_MODE to 1 if you'd rather fit-without-distortion (may leave
-// small gaps for off-ratio images). HLTB box art is ~3:4 portrait.
-const COVER_MODE = 4;
-const COVER_H = 132; // pixels tall
-const COVER_W = 99;  // pixels wide (99x132 ≈ 3:4)
-const CELL_PAD = 6;  // extra pixels so the image isn't clipped by the cell
-// If HowLongToBeat has no cover, fall back to the (square) PSN trophy icon.
-const FALLBACK_TO_ICON = true;
+// Cover art sizing. Mode 1 = fit inside the cell without distortion.
+// (Switch to 4 to force an exact box, at the cost of stretching odd shapes.)
+const COVER_MODE = 1;
+const COVER_H = 132; // cell height in pixels
+const COVER_W = 99;  // cell width in pixels (bump both for larger art)
+const CELL_PAD = 6;
+// Covers come from PlayStation key art. If none exists, leave the cell blank
+// rather than dropping in the square trophy icon.
+const FALLBACK_TO_ICON = false;
 
-// Columns the script fills automatically. "Cover" is leftmost.
 const AUTO_HEADERS = [
   "Cover",
   "Game",
@@ -30,7 +29,6 @@ const AUTO_HEADERS = [
   "Hours to beat",
   "Last played",
 ];
-// Your columns — the script only ever READS these, so your edits are safe.
 const PERSONAL_HEADERS = ["Status", "Rating", "Notes", "Goal/Reminder"];
 const ALL_HEADERS = [...AUTO_HEADERS, ...PERSONAL_HEADERS];
 
@@ -65,7 +63,21 @@ function platformFromCategory(cat) {
   return "";
 }
 
-// Build the =IMAGE() formula for a cover URL (or null if no URL).
+// Pick the best cover from a PSN title's concept art (high-res). Prefer key
+// art / portrait; avoid backgrounds and screenshots. Returns "" if none.
+function pickCover(title) {
+  const imgs = title && title.concept && title.concept.media && title.concept.media.images;
+  if (!Array.isArray(imgs) || imgs.length === 0) return "";
+  const prefer = ["MASTER", "KEYART", "KEY_ART", "COVER", "PORTRAIT"];
+  for (const p of prefer) {
+    const hit = imgs.find((im) => im && im.url && (im.type || "").toUpperCase().includes(p));
+    if (hit) return hit.url;
+  }
+  const bad = /BACKGROUND|SCREENSHOT|PROMO|LOGO|BANNER/i;
+  const nice = imgs.find((im) => im && im.url && !bad.test(im.type || ""));
+  return ((nice || imgs[0]) || {}).url || "";
+}
+
 function coverFormula(url) {
   if (!url) return null;
   const safe = String(url).replace(/"/g, "").replace(/^http:/, "https:");
@@ -82,7 +94,6 @@ async function getAuth() {
   return exchangeAccessCodeForAuthTokens(accessCode);
 }
 
-// Reliable backbone: every game you've earned a trophy in, plus progress %.
 async function pullTrophyTitles(auth) {
   const games = new Map();
   const limit = 100;
@@ -103,7 +114,7 @@ async function pullTrophyTitles(auth) {
         progress: typeof t.progress === "number" ? t.progress : "",
         playtime: "",
         lastPlayed: "",
-        iconUrl: t.trophyTitleIconUrl || "", // square fallback cover
+        iconUrl: t.trophyTitleIconUrl || "",
         coverUrl: "",
       });
     }
@@ -137,6 +148,8 @@ async function enrichPlayed(auth, games) {
         entry.playtime = durationToHours(t.playDuration);
         entry.lastPlayed = dateOnly(t.lastPlayedDateTime);
         if (!entry.platform) entry.platform = platformFromCategory(t.category);
+        const cov = pickCover(t);
+        if (cov) entry.coverUrl = cov; // high-res PSN key art
         games.set(key, entry);
       }
       if (titles.length < limit) break;
@@ -159,7 +172,15 @@ async function enrichPurchased(auth, games) {
       const titles = res.titles || [];
       for (const t of titles) {
         const key = norm(t.name);
-        if (!key || games.has(key)) continue;
+        if (!key) continue;
+        const existing = games.get(key);
+        if (existing) {
+          if (!existing.coverUrl) {
+            const c = pickCover(t);
+            if (c) existing.coverUrl = c;
+          }
+          continue;
+        }
         games.set(key, {
           name: t.name,
           platform: platformFromCategory(t.category),
@@ -167,7 +188,7 @@ async function enrichPurchased(auth, games) {
           playtime: "",
           lastPlayed: "",
           iconUrl: "",
-          coverUrl: "",
+          coverUrl: pickCover(t),
         });
       }
       if (titles.length < limit) break;
@@ -178,39 +199,45 @@ async function enrichPurchased(auth, games) {
   }
 }
 
-// Best-effort: "hours to beat" + portrait cover art from HowLongToBeat.
-// Cached: games already carrying an hours value in the sheet are skipped.
+// "Hours to beat" from HowLongToBeat (maintained library). Logs how many
+// lookups actually succeeded, so a silent breakage is visible in the run log.
 async function enrichHltb(games, knownHours) {
+  let attempted = 0;
+  let matched = 0;
   try {
-    const mod = await import("howlongtobeat");
-    const HowLongToBeatService =
-      mod.HowLongToBeatService ||
-      (mod.default && mod.default.HowLongToBeatService);
-    const service = new HowLongToBeatService();
+    const mod = await import("howlongtobeat-core");
+    const HowLongToBeat =
+      mod.HowLongToBeat || (mod.default && mod.default.HowLongToBeat) || mod.default;
+    const hltb = new HowLongToBeat();
 
     for (const [key, g] of games) {
       if (knownHours.has(key)) {
         g.hoursToBeat = knownHours.get(key);
-        continue; // cover for these is preserved from the sheet
+        continue;
       }
+      attempted++;
       try {
-        const results = await service.search(g.name);
+        const results = await hltb.search(g.name);
         if (results && results.length) {
           results.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
           const best = results[0];
           if ((best.similarity || 0) >= 0.4) {
-            g.hoursToBeat = best.gameplayMain || best.gameplayMainExtra || "";
-            if (best.imageUrl) g.coverUrl = best.imageUrl;
+            const hrs = best.gameplayMain || best.gameplayMainExtra || "";
+            if (hrs) {
+              g.hoursToBeat = hrs;
+              matched++;
+            }
           }
         }
       } catch {
         // one bad lookup shouldn't stop the rest
       }
-      await sleep(300);
+      await sleep(400);
     }
   } catch (e) {
-    console.warn("HowLongToBeat pull skipped:", e.message);
+    console.warn("HowLongToBeat unavailable:", e.message);
   }
+  console.log(`HLTB: filled hours for ${matched} of ${attempted} new lookups.`);
 }
 
 // ---- Google Sheets ----------------------------------------------------------
@@ -241,7 +268,7 @@ async function readSheet(sheets) {
   const read = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: SHEET_TAB,
-    valueRenderOption: "FORMULA", // so existing =IMAGE() formulas survive
+    valueRenderOption: "FORMULA",
   });
   const rows = read.data.values || [];
   let header = rows[0];
@@ -283,8 +310,6 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
     if (g.hoursToBeat !== undefined && g.hoursToBeat !== "") {
       row[idx["Hours to beat"]] = g.hoursToBeat;
     }
-    // Cover: a fresh HLTB cover wins; otherwise keep whatever is there;
-    // only if the cell is empty do we drop in the square icon fallback.
     const existingCover = row[idx["Cover"]];
     if (g.coverUrl) {
       row[idx["Cover"]] = coverFormula(g.coverUrl);
@@ -325,10 +350,9 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
   });
 
   console.log(`Synced ${games.size} games (${appended.length} new).`);
-  return finalValues.length - 1; // number of data rows
+  return finalValues.length - 1;
 }
 
-// Size the cover column + data rows so every image sits in an identical box.
 async function sizeCovers(sheets, spreadsheetId, sheetId, dataRowCount) {
   if (dataRowCount < 1) return;
   const requests = [
@@ -341,12 +365,7 @@ async function sizeCovers(sheets, spreadsheetId, sheetId, dataRowCount) {
     },
     {
       updateDimensionProperties: {
-        range: {
-          sheetId,
-          dimension: "ROWS",
-          startIndex: 1,
-          endIndex: 1 + dataRowCount,
-        },
+        range: { sheetId, dimension: "ROWS", startIndex: 1, endIndex: 1 + dataRowCount },
         properties: { pixelSize: COVER_H + CELL_PAD },
         fields: "pixelSize",
       },
