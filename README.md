@@ -68,15 +68,15 @@ Note: Number format for the Price paid column. Change it if you want a currency 
 
 Variable: "COVER_MODE"
 Default: 1
-Note: 1 scales cover art to fit the cell without distorting it. 4 forces an exact pixel box and will stretch art that is not that shape.
+Note: 1 scales cover art to fit the cell without distorting it. 4 forces an exact pixel box and will stretch art to fit that shape.
 
 Variable: "ROW_HEIGHT" / "HEADER_HEIGHT"
-Default: 150 / 25
-Note: Row heights in pixels. Cover art scales to fit the cell.
+Default: 150 / 50
+Note: Row heights in pixels.
 
 Variable: "STATUS_OPTIONS"
-Default: Backlog,Playing,Beaten,Platinum,Dropped
-Note: Comma-separated list of choices in the Status dropdown.
+Default: Backlog,Playing,Beaten,Platinum,Dropped,Ongoing
+Note: Comma-separated list of choices in the Status dropdown. Add here if you want more options.
 
 Variable: HLTB_ENABLED
 Default: 1
