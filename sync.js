@@ -75,7 +75,9 @@ const AUTO_HEADERS = [
   "Silver",
   "Gold",
   "Platinum",
+  "Trophies",
   PLAYTIME_H,
+  "Plays",
   "Hours to beat",
   "First played",
   "Last played",
@@ -121,6 +123,10 @@ const norm = (s) =>
     .replace(/\s+(trophies|trophy set)$/, "");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Total across all four grades. Platinum is 0 or 1, so it counts as one trophy.
+const totalTrophies = (t) =>
+  t ? (t.bronze || 0) + (t.silver || 0) + (t.gold || 0) + (t.platinum || 0) : 0;
 
 // The Game cell may hold a =HYPERLINK() formula rather than bare text. The game
 // name is the formula's label, and that name is the key every row is matched on,
@@ -240,6 +246,9 @@ async function pullTrophyTitles(auth) {
         coverUrl: "",
         // PSN reports platinum as 0 or 1 — a title has at most one.
         trophies: t.earnedTrophies || null,
+        definedTrophies: t.definedTrophies || null,
+        // Games hidden on the PSN profile itself.
+        hidden: t.hiddenFlag === true,
       });
     }
     if (titles.length < limit) break;
@@ -274,6 +283,7 @@ async function enrichPlayed(auth, games) {
         entry.lastPlayed = dateOnly(t.lastPlayedDateTime);
         entry.firstPlayed = dateOnly(t.firstPlayedDateTime);
         entry.service = t.service || "";
+        if (typeof t.playCount === "number") entry.playCount = t.playCount;
         if (t.concept && t.concept.id) entry.conceptId = t.concept.id;
         if (!entry.platform) entry.platform = platformFromCategory(t.category);
         const cov = pickCover(t);
@@ -485,6 +495,20 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
     if (idx["First played"] !== -1) {
       row[idx["First played"]] = g.firstPlayed || "";
     }
+    if (idx["Trophies"] !== -1) {
+      row[idx["Trophies"]] = g.definedTrophies
+        ? `${totalTrophies(g.trophies)} / ${totalTrophies(g.definedTrophies)}`
+        : "";
+    }
+    if (idx["Plays"] !== -1) {
+      row[idx["Plays"]] = typeof g.playCount === "number" ? g.playCount : "";
+    }
+    // PSN's own hidden flag ticks the box but never unties it. Hiding a game in
+    // the sheet is your decision, and PSN not hiding it is no reason to undo it.
+    if (idx["Hidden"] !== -1 && g.hidden) {
+      const current = String(row[idx["Hidden"]] ?? "").trim().toUpperCase();
+      if (current !== "TRUE") row[idx["Hidden"]] = true;
+    }
     for (const h of TROPHY_HEADERS) {
       const i = idx[h];
       if (i === -1) continue;
@@ -652,6 +676,8 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
   sizeCol(PROGRESS_H, 50);
   sizeCol(PLAYTIME_H, 50);
   sizeCol("Hours to beat", 50);
+  sizeCol("Trophies", 60);
+  sizeCol("Plays", 50);
   sizeCol("First played", 75);
   sizeCol("Last played", 75);
   for (const t of TROPHY_HEADERS) sizeCol(t, 25);
@@ -693,6 +719,8 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
   styleCol(PROGRESS_H, ...CENTER);
   styleCol(PLAYTIME_H, ...CENTER);
   styleCol("Hours to beat", ...CENTER);
+  styleCol("Trophies", ...CENTER);
+  styleCol("Plays", ...CENTER);
   styleCol("Game", ...WRAP);
   styleCol("Notes", ...WRAP);
   styleCol("Goal/Reminder", ...WRAP);
@@ -753,6 +781,7 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
   numberFormat(PLAYTIME_H, "0.0");
   numberFormat("Price paid", PRICE_FORMAT);
   numberFormat("Priority", "0");
+  numberFormat("Plays", "0");
 
   // One read of the tab's current formatting state, used by the merge,
   // banding and conditional-rule sections below.
