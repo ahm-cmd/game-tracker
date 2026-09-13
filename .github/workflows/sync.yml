@@ -2,21 +2,34 @@ name: Sync PSN games
 
 on:
   schedule:
+    # 08:00 UTC daily. https://crontab.guru to pick your own.
     - cron: "0 8 * * *"
   workflow_dispatch: {}
+
+# A scheduled run and a manual one writing to the same sheet at the same time
+# would clobber each other.
+concurrency:
+  group: psn-sync
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install
+          cache: npm
+
+      - run: npm ci
+
       - run: node sync.js
         env:
           NPSSO: ${{ secrets.NPSSO }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
-          SHEET_TAB: Games
+          SHEET_TAB: ${{ vars.SHEET_TAB || 'Games' }}
+          HLTB_ENABLED: ${{ vars.HLTB_ENABLED || '1' }}

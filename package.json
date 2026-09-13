@@ -1,10 +1,20 @@
 {
-  "name": "psn-game-tracker",
+  "name": "game-tracker",
   "version": "1.0.0",
+  "description": "Sync your PlayStation library into a Google Sheet, with cover art, trophy progress and how-long-to-beat estimates.",
   "private": true,
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=20.6"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ahm-cmd/game-tracker.git"
+  },
   "scripts": {
-    "sync": "node sync.js"
+    "sync": "node sync.js",
+    "sync:local": "node --env-file=.env sync.js"
   },
   "dependencies": {
     "psn-api": "^2.18.0",
