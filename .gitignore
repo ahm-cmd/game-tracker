@@ -1,0 +1,12 @@
+# Secrets — never commit these
+.env
+.env.local
+*service-account*.json
+credentials.json
+
+# Dependencies
+node_modules/
+
+# Logs / OS cruft
+npm-debug.log*
+.DS_Store
