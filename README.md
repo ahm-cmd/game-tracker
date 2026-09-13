@@ -8,13 +8,19 @@ Games that appear on both PS4 and PS5 are recorded in a single row.
 
 Written by the sync, and overwritten on every run:
 
-Cover, Game, Platform, Progress %, Bronze, Silver, Gold, Platinum, Playtime (hrs), Hours to beat, Last played.
+Cover, Game, Platform, Source, Progress %, Bronze, Silver, Gold, Platinum, Playtime (hrs), Hours to beat, Last played, Sort order.
 
 Bronze, Silver, and Gold are the counts of trophies you have earned in that game. Platinum is 1 if you have the platinum and 0 if you do not.
 
+Source is filled in automatically from PlayStation's own records: "Purchased" if you own the game outright, "PS Plus" if you have it through the subscription. It reflects how you have access right now, so a Plus game you later buy outright will change.
+
+Game titles link to their PlayStation Store page where Sony provides one.
+
+Sort order is a formula, explained under Priority below.
+
 Yours to fill in. The sync never writes a value into these:
 
-Status, Rating, Notes, Goal/Reminder, Hidden.
+Status, Priority, Rating, Price paid, Notes, Goal/Reminder, Hidden.
 
 If you already have a sheet that is missing some of these columns, the script adds only the ones that are absent and leaves your existing columns where they are, so nothing shifts out of alignment.
 
@@ -23,12 +29,16 @@ If you already have a sheet that is missing some of these columns, the script ad
 The sync sets these up so the sheet stays readable as it grows.
 
 1. Progress % is shaded from red to green as completion increases. Any game with the platinum is shaded light blue instead, so finished games stand out. A game with no trophies earned reads 0% and sits at the red end, rather than being left blank.
-2. Status is a dropdown: Backlog, Playing, Beaten, Platinum, Dropped. Configurable, see below.
-3. Rating is a dropdown from 1 to 5.
-4. Hidden is a checkbox. Tick it and the row drops out of the view. The row is not deleted and keeps syncing, it is only filtered out. To see hidden rows again, open the filter on the Hidden column and re-check TRUE, or clear the filter.
-5. The header row is frozen so it stays visible while scrolling.
-6. Progress % displays as a percentage, and Playtime displays to one decimal. Both are still numbers underneath, so sorting and the colour scale keep working.
-7. Rows are 150px tall to give the cover art room, with a 25px header. Cover, Game, and Platform have fixed widths.
+2. Status is a dropdown: Backlog, In Queue, Playing, Ongoing, Beaten, Platinum, Dropped. Configurable, see below.
+3. Rating is a dropdown from 1 to 5 in half steps, so 3.5 is available.
+4. Priority is yours to fill in. Enter 1 for the next game you intend to play, 2 for the one after, and so on. The Sort order column works out the actual running order from it: anything marked Beaten, Platinum, or Dropped sinks to the bottom, games with no priority sit in the middle, and your numbered games rise to the top. Sort by Sort order to see that list. It is a live formula, so changing a Status or a Priority reorders things straight away without waiting for a sync.
+5. Price paid is yours to fill in, formatted to two decimal places.
+6. Hidden is a checkbox. Tick it and the row drops out of the view. The row is not deleted and keeps syncing, it is only filtered out. To see hidden rows again, open the filter on the Hidden column and re-check TRUE, or clear the filter.
+7. A banner across the top shows when the sync last ran. If that timestamp stops moving, the Action has stopped working.
+8. The banner and header rows are frozen, so they stay visible while scrolling.
+9. Rows alternate between white and light grey.
+10. Progress % displays as a percentage, and Playtime displays to one decimal. Both are still numbers underneath, so sorting and the colour scale keep working.
+11. Rows are 150px tall to give the cover art room, with a 25px header. Cover, Game, and Platform have fixed widths.
 
 ## Running through GitHub Actions
 
@@ -82,6 +92,14 @@ Variable: "COVER_W" / "GAME_W" / "PLATFORM_W"
 Default: 150 / 150 / 25
 Note: Column widths in pixels.
 
+Variable: "BANNER_SPAN" / "BANNER_HEIGHT"
+Default: 5 / 28
+Note: How many cells the last-synced banner spans across the top, and how tall that row is.
+
+Variable: "PRICE_FORMAT"
+Default: 0.00
+Note: Number format for the Price paid column. Change it if you want a currency symbol, e.g. "£"#,##0.00
+
 Variable: "COVER_MODE"
 Default: 1
 Note: 1 scales cover art to fit the cell without distorting it. 4 forces an exact pixel box and will stretch art that is not that shape.
@@ -118,6 +136,7 @@ Deleting a row is not the way to hide a game from your list, since the next sync
 Cover art is drawn directly from Sony's servers. Older titles without cover art will appear blank.
 Sony does not publish key art for every title. Where it is missing, the sheet keeps whatever cover it already had rather than blanking the cell.
 The sync owns conditional formatting on the Games tab. It clears the existing rules and rebuilds its own on every run, so custom colour rules added there will not survive. Borders, fonts, and other formatting are left alone.
+The sync also owns the row banding and the banner merge at the top of the sheet, rebuilding both on every run. It does not touch fonts, borders, text wrapping, or vertical alignment, so anything you set there by hand will survive.
 The filter is created once and then left alone, so any sort or extra criteria you add will survive future syncs. Delete the filter in Sheets and the next run will rebuild the default one.
 
 ## Built with

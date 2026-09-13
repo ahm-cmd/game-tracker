@@ -30,11 +30,22 @@ const HEADER_HEIGHT = num("HEADER_HEIGHT", 25);
 // Options offered by the Status dropdown, in order. Override with a
 // comma-separated list to suit how you actually track things.
 const STATUS_OPTIONS = (
-  process.env.STATUS_OPTIONS || "Backlog,Playing,Beaten,Platinum,Dropped"
+  process.env.STATUS_OPTIONS ||
+  "Backlog,In Queue,Playing,Ongoing,Beaten,Platinum,Dropped"
 )
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+// Statuses that mean "done with it" — these sink to the bottom of the play order.
+const DONE_STATUSES = ["Beaten", "Platinum", "Dropped"];
+
+// Half steps, so a 3.5 is expressible.
+const RATING_OPTIONS = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5];
+
+const BANNER_HEIGHT = num("BANNER_HEIGHT", 28);
+// How many cells the timestamp banner spans across the top.
+const BANNER_SPAN = num("BANNER_SPAN", 5);
 
 // HowLongToBeat is the slow, flaky step. HLTB_ENABLED=0 skips it entirely.
 const HLTB_ENABLED = process.env.HLTB_ENABLED !== "0";
@@ -47,6 +58,7 @@ const AUTO_HEADERS = [
   "Cover",
   "Game",
   "Platform",
+  "Source",
   "Progress %",
   "Bronze",
   "Silver",
@@ -55,9 +67,18 @@ const AUTO_HEADERS = [
   "Playtime (hrs)",
   "Hours to beat",
   "Last played",
+  "Sort order",
 ];
 const TROPHY_HEADERS = ["Bronze", "Silver", "Gold", "Platinum"];
-const PERSONAL_HEADERS = ["Status", "Rating", "Notes", "Goal/Reminder", "Hidden"];
+const PERSONAL_HEADERS = [
+  "Status",
+  "Priority",
+  "Rating",
+  "Price paid",
+  "Notes",
+  "Goal/Reminder",
+  "Hidden",
+];
 const ALL_HEADERS = [...AUTO_HEADERS, ...PERSONAL_HEADERS];
 
 // ---- Helpers ----------------------------------------------------------------
@@ -70,6 +91,30 @@ const norm = (s) =>
     .trim();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The Game cell may hold a =HYPERLINK() formula rather than bare text. The game
+// name is the formula's label, and that name is the key every row is matched on,
+// so it has to be recovered before normalising or rows would duplicate.
+const HYPERLINK_LABEL = /^\s*=HYPERLINK\(\s*"[^"]*"\s*,\s*"([^"]*)"/i;
+function gameNameFromCell(v) {
+  if (typeof v !== "string") return v;
+  const m = HYPERLINK_LABEL.exec(v);
+  return m ? m[1] : v;
+}
+
+// PSN's own store URL for a game, built from its concept id.
+function gameCell(name, conceptId) {
+  if (!conceptId) return name;
+  const safe = String(name).replace(/"/g, "'");
+  return `=HYPERLINK("https://store.playstation.com/concept/${conceptId}", "${safe}")`;
+}
+
+// How the account has access to the game, as reported by PSN.
+function sourceLabel(service, purchased) {
+  if (service === "ps_plus") return "PS Plus";
+  if (service === "none_purchased") return "Purchased";
+  return purchased ? "Purchased" : "";
+}
 
 function durationToHours(iso) {
   if (!iso) return "";
@@ -197,6 +242,8 @@ async function enrichPlayed(auth, games) {
         };
         entry.playtime = durationToHours(t.playDuration);
         entry.lastPlayed = dateOnly(t.lastPlayedDateTime);
+        entry.service = t.service || "";
+        if (t.concept && t.concept.id) entry.conceptId = t.concept.id;
         if (!entry.platform) entry.platform = platformFromCategory(t.category);
         const cov = pickCover(t);
         if (cov) entry.coverUrl = cov; // high-res PSN key art
@@ -225,6 +272,10 @@ async function enrichPurchased(auth, games) {
         if (!key) continue;
         const existing = games.get(key);
         if (existing) {
+          existing.purchased = true;
+          if (!existing.conceptId && t.concept && t.concept.id) {
+            existing.conceptId = t.concept.id;
+          }
           if (!existing.coverUrl) {
             const c = pickCover(t);
             if (c) existing.coverUrl = c;
@@ -240,6 +291,8 @@ async function enrichPurchased(auth, games) {
           iconUrl: "",
           coverUrl: pickCover(t),
           trophies: null,
+          purchased: true,
+          conceptId: t.concept && t.concept.id ? t.concept.id : null,
         });
       }
       if (titles.length < limit) break;
@@ -344,8 +397,14 @@ async function readSheet(sheets) {
     valueRenderOption: "FORMULA",
   });
   const rows = read.data.values || [];
-  let header = rows[0];
-  const body = rows.slice(1);
+  // A timestamp banner may sit above the header, so find the header by content
+  // rather than assuming row 1. Sheets written by older versions have no banner.
+  let headerRow = rows.findIndex(
+    (r) => Array.isArray(r) && r.some((c) => gameNameFromCell(c) === "Game")
+  );
+  if (headerRow === -1) headerRow = rows.length ? 0 : -1;
+  let header = headerRow === -1 ? null : rows[headerRow];
+  const body = headerRow === -1 ? [] : rows.slice(headerRow + 1);
   // Keep whatever column order the sheet already uses and append only what is
   // missing. Replacing the header wholesale would silently shift every existing
   // row out of alignment the first time a new column is introduced.
@@ -363,7 +422,7 @@ function existingHoursMap(header, body) {
   const hoursCol = header.indexOf("Hours to beat");
   if (hoursCol === -1) return map;
   for (const r of body) {
-    const key = norm(r[gameCol]);
+    const key = norm(gameNameFromCell(r[gameCol]));
     const val = r[hoursCol];
     if (key && val !== undefined && val !== "") map.set(key, val);
   }
@@ -381,8 +440,11 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
     return r;
   };
   const setAuto = (row, g) => {
-    row[idx["Game"]] = g.name;
+    row[idx["Game"]] = gameCell(g.name, g.conceptId);
     row[idx["Platform"]] = g.platform || "";
+    if (idx["Source"] !== -1) {
+      row[idx["Source"]] = sourceLabel(g.service, g.purchased);
+    }
     row[idx["Progress %"]] = typeof g.progress === "number" ? g.progress : 0;
     row[idx["Playtime (hrs)"]] = g.playtime ?? "";
     row[idx["Last played"]] = g.lastPlayed || "";
@@ -410,7 +472,7 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
 
   const rowByKey = new Map();
   for (const r of body) {
-    const key = norm(r[gameCol]);
+    const key = norm(gameNameFromCell(r[gameCol]));
     if (key) rowByKey.set(key, r);
   }
 
@@ -430,7 +492,28 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
     return r;
   });
 
-  const finalValues = [header, ...body, ...appended];
+  const banner = pad([
+    `Last synced: ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`,
+  ]);
+  const finalValues = [banner, header, ...body, ...appended];
+
+  // Sort order is a formula, not a value, so it keeps reacting as you edit
+  // Status and Priority by hand. Row numbers are only known now that the sheet
+  // has been assembled, hence writing it here rather than in setAuto.
+  const sortCol = idx["Sort order"];
+  const statusCol = idx["Status"];
+  const priorityCol = idx["Priority"];
+  if (sortCol !== -1 && statusCol !== -1 && priorityCol !== -1) {
+    const s = colLetter(statusCol);
+    const p = colLetter(priorityCol);
+    const done = DONE_STATUSES.map((x) => `$${s}{R}="${x}"`).join(",");
+    for (let i = 2; i < finalValues.length; i++) {
+      const R = i + 1; // 1-based sheet row
+      finalValues[i][sortCol] =
+        `=IF(OR(${done.replace(/\{R\}/g, R)}),1000000,` +
+        `IF($${p}${R}="",500000,$${p}${R}))`;
+    }
+  }
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
@@ -440,7 +523,7 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
   });
 
   console.log(`Synced ${games.size} games (${appended.length} new).`);
-  return finalValues.length - 1;
+  return finalValues.length - 2;
 }
 
 // ---- Formatting -------------------------------------------------------------
@@ -454,6 +537,8 @@ function colLetter(i) {
 }
 
 const rgb = (r, g, b) => ({ red: r / 255, green: g / 255, blue: b / 255 });
+
+const PRICE_FORMAT = process.env.PRICE_FORMAT || "0.00";
 
 const PLATINUM_BG = rgb(173, 216, 230); // light blue, the platinum convention
 const PROGRESS_LOW = rgb(230, 124, 115);
@@ -488,17 +573,19 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
     });
   };
 
-  sizeRows(0, 1, HEADER_HEIGHT);
-  if (dataRowCount > 0) sizeRows(1, 1 + dataRowCount, ROW_HEIGHT);
+  sizeRows(0, 1, BANNER_HEIGHT);
+  sizeRows(1, 2, HEADER_HEIGHT);
+  if (dataRowCount > 0) sizeRows(2, 2 + dataRowCount, ROW_HEIGHT);
 
   sizeCol("Cover", COVER_W);
   sizeCol("Game", GAME_W);
   sizeCol("Platform", PLATFORM_W);
+  sizeCol("Sort order", 70);
 
   // Keep the header on screen while scrolling a few hundred rows.
   requests.push({
     updateSheetProperties: {
-      properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+      properties: { sheetId, gridProperties: { frozenRowCount: 2 } },
       fields: "gridProperties.frozenRowCount",
     },
   });
@@ -512,7 +599,7 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
       repeatCell: {
         range: {
           sheetId,
-          startRowIndex: 1,
+          startRowIndex: 2,
           startColumnIndex: i,
           endColumnIndex: i + 1,
         },
@@ -525,16 +612,71 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
   // PERCENT format, which would multiply by 100 again and show "4200%".
   numberFormat("Progress %", '0"%"');
   numberFormat("Playtime (hrs)", "0.0");
+  numberFormat("Price paid", PRICE_FORMAT);
+  numberFormat("Priority", "0");
 
-  // Clear existing rules before re-adding ours. Indices shift as rules are
+  // One read of the tab's current formatting state, used by the merge,
+  // banding and conditional-rule sections below.
   // removed, so delete from the end backwards.
   const meta = await sheets.spreadsheets.get({
     spreadsheetId,
-    fields: "sheets(properties.sheetId,conditionalFormats,basicFilter)",
+    fields:
+      "sheets(properties.sheetId,conditionalFormats,basicFilter,merges,bandedRanges)",
   });
   const sheet = (meta.data.sheets || []).find(
     (s) => s.properties.sheetId === sheetId
   );
+
+  // Merge the banner across the top. Re-merging an existing merge errors, so
+  // only touch it when the current merge doesn't already match.
+  const bannerWidth = Math.min(BANNER_SPAN, header.length);
+  const existingMerges = (sheet && sheet.merges) || [];
+  const bannerMerge = existingMerges.find((m) => m.startRowIndex === 0);
+  const bannerMatches =
+    bannerMerge &&
+    bannerMerge.startColumnIndex === 0 &&
+    bannerMerge.endColumnIndex === bannerWidth &&
+    bannerMerge.endRowIndex === 1;
+  if (!bannerMatches) {
+    if (bannerMerge) {
+      requests.push({
+        unmergeCells: {
+          range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+        },
+      });
+    }
+    requests.push({
+      mergeCells: {
+        range: {
+          sheetId,
+          startRowIndex: 0,
+          endRowIndex: 1,
+          startColumnIndex: 0,
+          endColumnIndex: bannerWidth,
+        },
+        mergeType: "MERGE_ALL",
+      },
+    });
+  }
+
+  // Alternating row colours. Like the conditional rules these stack if simply
+  // re-added, so the existing ones go first.
+  for (const b of (sheet && sheet.bandedRanges) || []) {
+    requests.push({ deleteBanding: { bandedRangeId: b.bandedRangeId } });
+  }
+  requests.push({
+    addBanding: {
+      bandedRange: {
+        range: { sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: header.length },
+        rowProperties: {
+          headerColor: rgb(232, 232, 232),
+          firstBandColor: rgb(255, 255, 255),
+          secondBandColor: rgb(246, 246, 246),
+        },
+      },
+    },
+  });
+
   const existingRules = (sheet && sheet.conditionalFormats) || [];
   for (let i = existingRules.length - 1; i >= 0; i--) {
     requests.push({ deleteConditionalFormatRule: { sheetId, index: i } });
@@ -548,7 +690,7 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
     const ranges = [
       {
         sheetId,
-        startRowIndex: 1,
+        startRowIndex: 2,
         startColumnIndex: progressCol,
         endColumnIndex: progressCol + 1,
       },
@@ -567,7 +709,7 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
               condition: {
                 type: "CUSTOM_FORMULA",
                 values: [
-                  { userEnteredValue: `=$${colLetter(platinumCol)}2=1` },
+                  { userEnteredValue: `=$${colLetter(platinumCol)}3=1` },
                 ],
               },
               format: { backgroundColor: PLATINUM_BG },
@@ -602,7 +744,7 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
       setDataValidation: {
         range: {
           sheetId,
-          startRowIndex: 1,
+          startRowIndex: 2,
           startColumnIndex: i,
           endColumnIndex: i + 1,
         },
@@ -618,7 +760,7 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
     });
   };
 
-  dropdown("Rating", [1, 2, 3, 4, 5]);
+  dropdown("Rating", RATING_OPTIONS);
   dropdown("Status", STATUS_OPTIONS);
 
   // Hidden is a checkbox. Ticking it drops the row out of the view via the
@@ -629,7 +771,7 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
       setDataValidation: {
         range: {
           sheetId,
-          startRowIndex: 1,
+          startRowIndex: 2,
           startColumnIndex: hiddenCol,
           endColumnIndex: hiddenCol + 1,
         },
@@ -647,11 +789,21 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
           filter: {
             range: {
               sheetId,
-              startRowIndex: 0,
+              startRowIndex: 1,
               startColumnIndex: 0,
               endColumnIndex: header.length,
             },
             criteria: { [hiddenCol]: { hiddenValues: ["TRUE"] } },
+            ...(col("Sort order") !== -1
+              ? {
+                  sortSpecs: [
+                    {
+                      dimensionIndex: col("Sort order"),
+                      sortOrder: "ASCENDING",
+                    },
+                  ],
+                }
+              : {}),
           },
         },
       });
