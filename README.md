@@ -22,7 +22,7 @@ If you already have a sheet that is missing some of these columns, the script ad
 
 The sync sets these up so the sheet stays readable as it grows.
 
-1. Progress % is shaded from red to green as completion increases. Any game with the platinum is shaded light blue instead, so finished games stand out.
+1. Progress % is shaded from red to green as completion increases. Any game with the platinum is shaded light blue instead, so finished games stand out. A game with no trophies earned reads 0% and sits at the red end, rather than being left blank.
 2. Status is a dropdown: Backlog, Playing, Beaten, Platinum, Dropped. Configurable, see below.
 3. Rating is a dropdown from 1 to 5.
 4. Hidden is a checkbox. Tick it and the row drops out of the view. The row is not deleted and keeps syncing, it is only filtered out. To see hidden rows again, open the filter on the Hidden column and re-check TRUE, or clear the filter.
@@ -82,6 +82,10 @@ Variable: "COVER_W" / "GAME_W" / "PLATFORM_W"
 Default: 150 / 150 / 25
 Note: Column widths in pixels.
 
+Variable: "COVER_MODE"
+Default: 1
+Note: 1 scales cover art to fit the cell without distorting it. 4 forces an exact pixel box and will stretch art that is not that shape.
+
 Variable: "ROW_HEIGHT" / "HEADER_HEIGHT"
 Default: 150 / 25
 Note: Row heights in pixels. Cover art scales to fit the cell.
@@ -112,6 +116,7 @@ Don't edit the sheet while a sync is working. Because the script reads the whole
 HowLongToBeat is not always reliable for the purposes of this project, and access may break in the future.
 Deleting a row is not the way to hide a game from your list, since the next sync will just add it back. Tick the Hidden checkbox instead.
 Cover art is drawn directly from Sony's servers. Older titles without cover art will appear blank.
+Sony does not publish key art for every title. Where it is missing, the sheet keeps whatever cover it already had rather than blanking the cell.
 The sync owns conditional formatting on the Games tab. It clears the existing rules and rebuilds its own on every run, so custom colour rules added there will not survive. Borders, fonts, and other formatting are left alone.
 The filter is created once and then left alone, so any sort or extra criteria you add will survive future syncs. Delete the filter in Sheets and the next run will rebuild the default one.
 

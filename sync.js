@@ -18,7 +18,9 @@ const SHEET_TAB = process.env.SHEET_TAB || "Games";
 
 // Cover art sizing. Mode 1 = fit inside the cell without distortion.
 // (Switch to 4 to force an exact box, at the cost of stretching odd shapes.)
-const COVER_MODE = 1;
+// 1 fits the art inside the cell without distorting it; 4 forces an exact
+// pixel box and will stretch anything that isn't that shape.
+const COVER_MODE = num("COVER_MODE", 1);
 const COVER_W = num("COVER_W", 150);      // Cover column width, pixels
 const GAME_W = num("GAME_W", 150);        // Game column width
 const PLATFORM_W = num("PLATFORM_W", 25); // Platform column width
@@ -102,6 +104,17 @@ function pickCover(title) {
   const bad = /BACKGROUND|SCREENSHOT|PROMO|LOGO|BANNER/i;
   const nice = imgs.find((im) => im && im.url && !bad.test(im.type || ""));
   return ((nice || imgs[0]) || {}).url || "";
+}
+
+// Cover cells written by earlier versions of this script are pinned to a fixed
+// pixel box, which squashes art that isn't exactly that shape. Re-emit any
+// existing formula in the current mode, keeping whatever URL it already points
+// at. Returns null if the cell isn't an =IMAGE() formula.
+const EXISTING_IMAGE = /^\s*=IMAGE\(\s*"([^"]+)"/i;
+function restyleCover(existing) {
+  if (typeof existing !== "string") return null;
+  const m = EXISTING_IMAGE.exec(existing);
+  return m ? coverFormula(m[1]) : null;
 }
 
 function coverFormula(url) {
@@ -370,7 +383,7 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
   const setAuto = (row, g) => {
     row[idx["Game"]] = g.name;
     row[idx["Platform"]] = g.platform || "";
-    row[idx["Progress %"]] = g.progress === "" ? "" : g.progress;
+    row[idx["Progress %"]] = typeof g.progress === "number" ? g.progress : 0;
     row[idx["Playtime (hrs)"]] = g.playtime ?? "";
     row[idx["Last played"]] = g.lastPlayed || "";
     for (const h of TROPHY_HEADERS) {
@@ -385,8 +398,13 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
     const existingCover = row[idx["Cover"]];
     if (g.coverUrl) {
       row[idx["Cover"]] = coverFormula(g.coverUrl);
-    } else if (!existingCover && FALLBACK_TO_ICON && g.iconUrl) {
-      row[idx["Cover"]] = coverFormula(g.iconUrl);
+    } else {
+      const restyled = restyleCover(existingCover);
+      if (restyled) {
+        row[idx["Cover"]] = restyled;
+      } else if (!existingCover && FALLBACK_TO_ICON && g.iconUrl) {
+        row[idx["Cover"]] = coverFormula(g.iconUrl);
+      }
     }
   };
 
