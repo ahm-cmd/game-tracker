@@ -1,0 +1,34 @@
+version: 2
+
+updates:
+  # The three npm packages sync.js depends on.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    # Routine minor and patch bumps arrive as one PR a week rather than three.
+    # Major versions still come separately: they can carry breaking changes,
+    # like googleapis 180 requiring a newer Node.
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # The actions used by the workflow (checkout, setup-node) get security
+  # fixes too, and are easy to forget because they aren't in package.json.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/New_York
+    commit-message:
+      prefix: "ci"
