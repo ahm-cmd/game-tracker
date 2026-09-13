@@ -46,7 +46,7 @@ const AUTO_HEADERS = [
   "Last played",
 ];
 const TROPHY_HEADERS = ["Bronze", "Silver", "Gold", "Platinum"];
-const PERSONAL_HEADERS = ["Status", "Rating", "Notes", "Goal/Reminder"];
+const PERSONAL_HEADERS = ["Status", "Rating", "Notes", "Goal/Reminder", "Hidden"];
 const ALL_HEADERS = [...AUTO_HEADERS, ...PERSONAL_HEADERS];
 
 // ---- Helpers ----------------------------------------------------------------
@@ -468,11 +468,42 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
   sizeCol("Game", GAME_W);
   sizeCol("Platform", PLATFORM_W);
 
+  // Keep the header on screen while scrolling a few hundred rows.
+  requests.push({
+    updateSheetProperties: {
+      properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+      fields: "gridProperties.frozenRowCount",
+    },
+  });
+
+  // Display formats only — the underlying values stay numeric so sorting,
+  // filtering and the colour scale all keep working.
+  const numberFormat = (name, pattern) => {
+    const i = col(name);
+    if (i === -1) return;
+    requests.push({
+      repeatCell: {
+        range: {
+          sheetId,
+          startRowIndex: 1,
+          startColumnIndex: i,
+          endColumnIndex: i + 1,
+        },
+        cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern } } },
+        fields: "userEnteredFormat.numberFormat",
+      },
+    });
+  };
+  // PSN reports progress as 0-100, so append a literal % rather than using a
+  // PERCENT format, which would multiply by 100 again and show "4200%".
+  numberFormat("Progress %", '0"%"');
+  numberFormat("Playtime (hrs)", "0.0");
+
   // Clear existing rules before re-adding ours. Indices shift as rules are
   // removed, so delete from the end backwards.
   const meta = await sheets.spreadsheets.get({
     spreadsheetId,
-    fields: "sheets(properties.sheetId,conditionalFormats)",
+    fields: "sheets(properties.sheetId,conditionalFormats,basicFilter)",
   });
   const sheet = (meta.data.sheets || []).find(
     (s) => s.properties.sheetId === sheetId
@@ -559,6 +590,43 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
         },
       },
     });
+  }
+
+  // Hidden is a checkbox. Ticking it drops the row out of the view via the
+  // filter below; untick it, or clear the filter, to get the row back.
+  const hiddenCol = col("Hidden");
+  if (hiddenCol !== -1) {
+    requests.push({
+      setDataValidation: {
+        range: {
+          sheetId,
+          startRowIndex: 1,
+          startColumnIndex: hiddenCol,
+          endColumnIndex: hiddenCol + 1,
+        },
+        rule: { condition: { type: "BOOLEAN" }, showCustomUi: true },
+      },
+    });
+
+    // Set the filter once and then leave it alone: re-applying it on every run
+    // would throw away whatever sort or extra criteria you'd set up. Delete the
+    // filter in Sheets and the next sync will recreate it from scratch.
+    const hasFilter = Boolean(sheet && sheet.basicFilter);
+    if (!hasFilter) {
+      requests.push({
+        setBasicFilter: {
+          filter: {
+            range: {
+              sheetId,
+              startRowIndex: 0,
+              startColumnIndex: 0,
+              endColumnIndex: header.length,
+            },
+            criteria: { [hiddenCol]: { hiddenValues: ["TRUE"] } },
+          },
+        },
+      });
+    }
   }
 
   if (requests.length) {
