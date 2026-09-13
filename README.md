@@ -1,8 +1,34 @@
 Keeps a Google Sheet synced with your PlayStation library.
-Synced elements include: cover art, trophy progress, time played, and an estimate of how long each game takes to finish.
-Manual elements include: status, rating, and notes.
+Synced elements include: cover art, trophy counts by grade, trophy progress, time played, and an estimate of how long each game takes to finish.
+Manual elements include: status, rating, notes, goal/reminder, and hidden.
 
 Games that appear on both PS4 and PS5 are recorded in a single row.
+
+## Columns
+
+Written by the sync, and overwritten on every run:
+
+Cover, Game, Platform, Progress %, Bronze, Silver, Gold, Platinum, Playtime (hrs), Hours to beat, Last played.
+
+Bronze, Silver, and Gold are the counts of trophies you have earned in that game. Platinum is 1 if you have the platinum and 0 if you do not.
+
+Yours to fill in. The sync never writes a value into these:
+
+Status, Rating, Notes, Goal/Reminder, Hidden.
+
+If you already have a sheet that is missing some of these columns, the script adds only the ones that are absent and leaves your existing columns where they are, so nothing shifts out of alignment.
+
+## Formatting
+
+The sync sets these up so the sheet stays readable as it grows.
+
+1. Progress % is shaded from red to green as completion increases. Any game with the platinum is shaded light blue instead, so finished games stand out.
+2. Status is a dropdown: Backlog, Playing, Beaten, Platinum, Dropped. Configurable, see below.
+3. Rating is a dropdown from 1 to 5.
+4. Hidden is a checkbox. Tick it and the row drops out of the view. The row is not deleted and keeps syncing, it is only filtered out. To see hidden rows again, open the filter on the Hidden column and re-check TRUE, or clear the filter.
+5. The header row is frozen so it stays visible while scrolling.
+6. Progress % displays as a percentage, and Playtime displays to one decimal. Both are still numbers underneath, so sorting and the colour scale keep working.
+7. Rows are 150px tall to give the cover art room, with a 25px header. Cover, Game, and Platform have fixed widths.
 
 ## Running through GitHub Actions
 
@@ -35,7 +61,7 @@ https://docs.google.com/spreadsheets/d/<THIS_IS_YOUR_SHEET_ID>/edit
 
 ## Running locally
 
-Node 20.6. or newer is required.
+Node 22 or newer is required (googleapis will not run on anything older).
 
 ```bash
 npm ci # "clean install command" that reads package-lock.json and installs those versions
@@ -46,17 +72,25 @@ After setup, you can run ```npm run sync:local``` for convenience.
 
 ## Configuration
 
-Several files you may want to adjust.
+Several variables you may want to adjust.
 
 Variable: "SHEET_TAB"
 Default: "Games"
 Note: Determines the tab name in the shared Sheet that the Action's output will write to.
 
-Variable: Cover_W / Cover_H
-Default: 99 / 132
-Note: Determines cover art cell size in pixels
+Variable: "COVER_W" / "GAME_W" / "PLATFORM_W"
+Default: 150 / 150 / 25
+Note: Column widths in pixels.
 
-Variable: HTLB_ENABLED
+Variable: "ROW_HEIGHT" / "HEADER_HEIGHT"
+Default: 150 / 25
+Note: Row heights in pixels. Cover art scales to fit the cell.
+
+Variable: "STATUS_OPTIONS"
+Default: Backlog,Playing,Beaten,Platinum,Dropped
+Note: Comma-separated list of choices in the Status dropdown.
+
+Variable: HLTB_ENABLED
 Default: 1
 Note: Set to 0 to skip HowLongToBeat lookups
 
@@ -68,12 +102,18 @@ Note: Pause between each HLTB lookup. Lowering this value may result in rejected
 
 On first run, all necessary rows and titles populate the "Game" sheet. Trophy titles, played games, and purchases import via your PlayStation session token. All entries are merged by normalized titles. On subsequent runs, existing rows are updated in place and rows are only created when new games have been added to your PlayStation library since the last run. HowLongToBeat values are never updated given the slow and unreliable nature of calls to its database.
 
+## When it breaks
+
+If a scheduled run fails, the workflow opens an issue on your repo with a link to the run log, instead of failing quietly. It will not open a second issue while the first one is still open. The most common cause is an expired NPSSO token, see step 12.
+
 ## Restrictions
 
 Don't edit the sheet while a sync is working. Because the script reads the whole tab and writes it all back, any edits will be overwritten.
 HowLongToBeat is not always reliable for the purposes of this project, and access may break in the future.
-Deleting a row is not the way to blacklist a game or hide it from your list. This may come in a future update.
+Deleting a row is not the way to hide a game from your list, since the next sync will just add it back. Tick the Hidden checkbox instead.
 Cover art is drawn directly from Sony's servers. Older titles without cover art will appear blank.
+The sync owns conditional formatting on the Games tab. It clears the existing rules and rebuilds its own on every run, so custom colour rules added there will not survive. Borders, fonts, and other formatting are left alone.
+The filter is created once and then left alone, so any sort or extra criteria you add will survive future syncs. Delete the filter in Sheets and the next run will rebuild the default one.
 
 ## Built with
 
