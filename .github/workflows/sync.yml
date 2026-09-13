@@ -12,6 +12,10 @@ concurrency:
   group: psn-sync
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -21,7 +25,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # googleapis 180+ requires Node 22 or newer.
+          node-version: 22
           cache: npm
 
       - run: npm ci
@@ -33,3 +38,39 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
           SHEET_TAB: ${{ vars.SHEET_TAB || 'Games' }}
           HLTB_ENABLED: ${{ vars.HLTB_ENABLED || '1' }}
+
+      # A scheduled job that quietly stops working is worse than one that
+      # breaks loudly. The NPSSO token expires roughly every two months, so
+      # this will fire eventually — file an issue rather than relying on
+      # someone noticing a red X.
+      - name: Open an issue if the sync failed
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="PSN sync is failing"
+          open=$(gh issue list --state open --search "in:title \"$title\"" \
+                   --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            echo "Issue #$open is already open; not filing another."
+            exit 0
+          fi
+          gh issue create --title "$title" --body "$(cat <<BODY
+          The scheduled sync failed. Run log: $RUN_URL
+
+          **Most likely cause:** the \`NPSSO\` secret has expired. PlayStation
+          session tokens last roughly two months.
+
+          To fix it:
+          1. Log in at [playstation.com](https://www.playstation.com).
+          2. Open <https://ca.account.sony.com/api/v1/ssocookie> in the same browser.
+          3. Copy the \`npsso\` value.
+          4. Update the \`NPSSO\` secret under Settings > Secrets and variables > Actions.
+          5. Re-run the workflow to confirm, then close this issue.
+
+          If the log points somewhere else — a Google permission error, a
+          HowLongToBeat outage — check the run before assuming the token.
+          BODY
+          )"
