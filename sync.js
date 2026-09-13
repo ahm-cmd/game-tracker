@@ -25,6 +25,15 @@ const PLATFORM_W = num("PLATFORM_W", 25); // Platform column width
 const ROW_HEIGHT = num("ROW_HEIGHT", 150);
 const HEADER_HEIGHT = num("HEADER_HEIGHT", 25);
 
+// Options offered by the Status dropdown, in order. Override with a
+// comma-separated list to suit how you actually track things.
+const STATUS_OPTIONS = (
+  process.env.STATUS_OPTIONS || "Backlog,Playing,Beaten,Platinum,Dropped"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 // HowLongToBeat is the slow, flaky step. HLTB_ENABLED=0 skips it entirely.
 const HLTB_ENABLED = process.env.HLTB_ENABLED !== "0";
 const HLTB_DELAY_MS = num("HLTB_DELAY_MS", 400);
@@ -566,31 +575,33 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
     });
   }
 
-  // Rating becomes a 1-5 dropdown. strict:false warns on other values rather
-  // than rejecting them, so nothing already in the column gets blocked.
-  const ratingCol = col("Rating");
-  if (ratingCol !== -1) {
+  // Dropdowns. strict:false warns on values outside the list rather than
+  // rejecting them, so nothing already in a column gets blocked.
+  const dropdown = (name, options) => {
+    const i = col(name);
+    if (i === -1 || options.length === 0) return;
     requests.push({
       setDataValidation: {
         range: {
           sheetId,
           startRowIndex: 1,
-          startColumnIndex: ratingCol,
-          endColumnIndex: ratingCol + 1,
+          startColumnIndex: i,
+          endColumnIndex: i + 1,
         },
         rule: {
           condition: {
             type: "ONE_OF_LIST",
-            values: [1, 2, 3, 4, 5].map((n) => ({
-              userEnteredValue: String(n),
-            })),
+            values: options.map((o) => ({ userEnteredValue: String(o) })),
           },
           showCustomUi: true,
           strict: false,
         },
       },
     });
-  }
+  };
+
+  dropdown("Rating", [1, 2, 3, 4, 5]);
+  dropdown("Status", STATUS_OPTIONS);
 
   // Hidden is a checkbox. Ticking it drops the row out of the view via the
   // filter below; untick it, or clear the filter, to get the row back.
