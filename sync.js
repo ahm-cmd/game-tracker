@@ -19,9 +19,11 @@ const SHEET_TAB = process.env.SHEET_TAB || "Games";
 // Cover art sizing. Mode 1 = fit inside the cell without distortion.
 // (Switch to 4 to force an exact box, at the cost of stretching odd shapes.)
 const COVER_MODE = 1;
-const COVER_H = num("COVER_H", 132); // cell height in pixels
-const COVER_W = num("COVER_W", 99);  // cell width in pixels
-const CELL_PAD = 6;
+const COVER_W = num("COVER_W", 150);      // Cover column width, pixels
+const GAME_W = num("GAME_W", 150);        // Game column width
+const PLATFORM_W = num("PLATFORM_W", 25); // Platform column width
+const ROW_HEIGHT = num("ROW_HEIGHT", 150);
+const HEADER_HEIGHT = num("HEADER_HEIGHT", 25);
 
 // HowLongToBeat is the slow, flaky step. HLTB_ENABLED=0 skips it entirely.
 const HLTB_ENABLED = process.env.HLTB_ENABLED !== "0";
@@ -35,10 +37,15 @@ const AUTO_HEADERS = [
   "Game",
   "Platform",
   "Progress %",
+  "Bronze",
+  "Silver",
+  "Gold",
+  "Platinum",
   "Playtime (hrs)",
   "Hours to beat",
   "Last played",
 ];
+const TROPHY_HEADERS = ["Bronze", "Silver", "Gold", "Platinum"];
 const PERSONAL_HEADERS = ["Status", "Rating", "Notes", "Goal/Reminder"];
 const ALL_HEADERS = [...AUTO_HEADERS, ...PERSONAL_HEADERS];
 
@@ -92,7 +99,7 @@ function coverFormula(url) {
   if (!url) return null;
   const safe = String(url).replace(/"/g, "").replace(/^http:/, "https:");
   return COVER_MODE === 4
-    ? `=IMAGE("${safe}", 4, ${COVER_H}, ${COVER_W})`
+    ? `=IMAGE("${safe}", 4, ${ROW_HEIGHT}, ${COVER_W})`
     : `=IMAGE("${safe}", ${COVER_MODE})`;
 }
 
@@ -134,6 +141,8 @@ async function pullTrophyTitles(auth) {
         lastPlayed: "",
         iconUrl: t.trophyTitleIconUrl || "",
         coverUrl: "",
+        // PSN reports platinum as 0 or 1 — a title has at most one.
+        trophies: t.earnedTrophies || null,
       });
     }
     if (titles.length < limit) break;
@@ -162,6 +171,7 @@ async function enrichPlayed(auth, games) {
           progress: "",
           iconUrl: "",
           coverUrl: "",
+          trophies: null,
         };
         entry.playtime = durationToHours(t.playDuration);
         entry.lastPlayed = dateOnly(t.lastPlayedDateTime);
@@ -207,6 +217,7 @@ async function enrichPurchased(auth, games) {
           lastPlayed: "",
           iconUrl: "",
           coverUrl: pickCover(t),
+          trophies: null,
         });
       }
       if (titles.length < limit) break;
@@ -313,8 +324,14 @@ async function readSheet(sheets) {
   const rows = read.data.values || [];
   let header = rows[0];
   const body = rows.slice(1);
-  const headerLooksValid = header && ALL_HEADERS.every((h) => header.includes(h));
-  if (!headerLooksValid) header = [...ALL_HEADERS];
+  // Keep whatever column order the sheet already uses and append only what is
+  // missing. Replacing the header wholesale would silently shift every existing
+  // row out of alignment the first time a new column is introduced.
+  if (!header || header.filter(Boolean).length === 0) {
+    header = [...ALL_HEADERS];
+  } else {
+    for (const h of ALL_HEADERS) if (!header.includes(h)) header.push(h);
+  }
   return { spreadsheetId, header, body };
 }
 
@@ -347,6 +364,12 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
     row[idx["Progress %"]] = g.progress === "" ? "" : g.progress;
     row[idx["Playtime (hrs)"]] = g.playtime ?? "";
     row[idx["Last played"]] = g.lastPlayed || "";
+    for (const h of TROPHY_HEADERS) {
+      const i = idx[h];
+      if (i === -1) continue;
+      const v = g.trophies ? g.trophies[h.toLowerCase()] : undefined;
+      row[i] = typeof v === "number" ? v : "";
+    }
     if (g.hoursToBeat !== undefined && g.hoursToBeat !== "") {
       row[idx["Hours to beat"]] = g.hoursToBeat;
     }
@@ -393,28 +416,157 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
   return finalValues.length - 1;
 }
 
-async function sizeCovers(sheets, spreadsheetId, sheetId, dataRowCount) {
-  if (dataRowCount < 1) return;
-  const requests = [
-    {
+// ---- Formatting -------------------------------------------------------------
+// Spreadsheet column index (0-based) to its A1 letter: 0 -> A, 26 -> AA.
+function colLetter(i) {
+  let s = "";
+  for (let n = i; n >= 0; n = Math.floor(n / 26) - 1) {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+  }
+  return s;
+}
+
+const rgb = (r, g, b) => ({ red: r / 255, green: g / 255, blue: b / 255 });
+
+const PLATINUM_BG = rgb(173, 216, 230); // light blue, the platinum convention
+const PROGRESS_LOW = rgb(230, 124, 115);
+const PROGRESS_MID = rgb(255, 214, 102);
+const PROGRESS_HIGH = rgb(87, 187, 138);
+
+// Column sizing, conditional colour, and the rating dropdown. Safe to re-run:
+// every request here overwrites rather than appends, and the conditional rules
+// are torn down and rebuilt so repeated syncs can't stack duplicates.
+async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCount) {
+  const col = (name) => header.indexOf(name);
+  const requests = [];
+
+  const sizeRows = (startIndex, endIndex, px) =>
+    requests.push({
       updateDimensionProperties: {
-        range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 1 },
-        properties: { pixelSize: COVER_W + CELL_PAD },
+        range: { sheetId, dimension: "ROWS", startIndex, endIndex },
+        properties: { pixelSize: px },
         fields: "pixelSize",
       },
-    },
-    {
+    });
+
+  const sizeCol = (name, px) => {
+    const i = col(name);
+    if (i === -1) return;
+    requests.push({
       updateDimensionProperties: {
-        range: { sheetId, dimension: "ROWS", startIndex: 1, endIndex: 1 + dataRowCount },
-        properties: { pixelSize: COVER_H + CELL_PAD },
+        range: { sheetId, dimension: "COLUMNS", startIndex: i, endIndex: i + 1 },
+        properties: { pixelSize: px },
         fields: "pixelSize",
       },
-    },
-  ];
-  await sheets.spreadsheets.batchUpdate({
+    });
+  };
+
+  sizeRows(0, 1, HEADER_HEIGHT);
+  if (dataRowCount > 0) sizeRows(1, 1 + dataRowCount, ROW_HEIGHT);
+
+  sizeCol("Cover", COVER_W);
+  sizeCol("Game", GAME_W);
+  sizeCol("Platform", PLATFORM_W);
+
+  // Clear existing rules before re-adding ours. Indices shift as rules are
+  // removed, so delete from the end backwards.
+  const meta = await sheets.spreadsheets.get({
     spreadsheetId,
-    requestBody: { requests },
+    fields: "sheets(properties.sheetId,conditionalFormats)",
   });
+  const sheet = (meta.data.sheets || []).find(
+    (s) => s.properties.sheetId === sheetId
+  );
+  const existingRules = (sheet && sheet.conditionalFormats) || [];
+  for (let i = existingRules.length - 1; i >= 0; i--) {
+    requests.push({ deleteConditionalFormatRule: { sheetId, index: i } });
+  }
+
+  const progressCol = col("Progress %");
+  const platinumCol = col("Platinum");
+  if (progressCol !== -1) {
+    // No endRowIndex: the rules cover the whole column, including rows that
+    // don't exist yet, so they never need revisiting as the library grows.
+    const ranges = [
+      {
+        sheetId,
+        startRowIndex: 1,
+        startColumnIndex: progressCol,
+        endColumnIndex: progressCol + 1,
+      },
+    ];
+
+    // Rules are evaluated in order, so the platinum rule goes first and wins
+    // outright where it matches.
+    let index = 0;
+    if (platinumCol !== -1) {
+      requests.push({
+        addConditionalFormatRule: {
+          index: index++,
+          rule: {
+            ranges,
+            booleanRule: {
+              condition: {
+                type: "CUSTOM_FORMULA",
+                values: [
+                  { userEnteredValue: `=$${colLetter(platinumCol)}2=1` },
+                ],
+              },
+              format: { backgroundColor: PLATINUM_BG },
+            },
+          },
+        },
+      });
+    }
+
+    // Everything else grades red -> yellow -> green across 0-100% complete.
+    requests.push({
+      addConditionalFormatRule: {
+        index,
+        rule: {
+          ranges,
+          gradientRule: {
+            minpoint: { color: PROGRESS_LOW, type: "NUMBER", value: "0" },
+            midpoint: { color: PROGRESS_MID, type: "NUMBER", value: "50" },
+            maxpoint: { color: PROGRESS_HIGH, type: "NUMBER", value: "100" },
+          },
+        },
+      },
+    });
+  }
+
+  // Rating becomes a 1-5 dropdown. strict:false warns on other values rather
+  // than rejecting them, so nothing already in the column gets blocked.
+  const ratingCol = col("Rating");
+  if (ratingCol !== -1) {
+    requests.push({
+      setDataValidation: {
+        range: {
+          sheetId,
+          startRowIndex: 1,
+          startColumnIndex: ratingCol,
+          endColumnIndex: ratingCol + 1,
+        },
+        rule: {
+          condition: {
+            type: "ONE_OF_LIST",
+            values: [1, 2, 3, 4, 5].map((n) => ({
+              userEnteredValue: String(n),
+            })),
+          },
+          showCustomUi: true,
+          strict: false,
+        },
+      },
+    });
+  }
+
+  if (requests.length) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests },
+    });
+  }
 }
 
 // ---- Run --------------------------------------------------------------------
@@ -446,7 +598,7 @@ async function main() {
   await enrichHltb(games, knownHours);
 
   const dataRowCount = await writeSheet(sheets, spreadsheetId, header, body, games);
-  await sizeCovers(sheets, spreadsheetId, sheetId, dataRowCount);
+  await applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCount);
 }
 
 main().catch((e) => {
