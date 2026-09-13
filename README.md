@@ -8,7 +8,7 @@ Games that appear on both PS4 and PS5 are recorded in a single row.
 
 Written by the sync, and overwritten on every run:
 
-Cover, Game, Platform, Source, Progress %, Bronze, Silver, Gold, Platinum, Playtime (hrs), Hours to beat, Last played, Sort order.
+Cover, Game, Platform, Source, %, Bronze, Silver, Gold, Platinum, Hrs. Played, Hours to beat, First played, Last played, Sort order.
 
 Bronze, Silver, and Gold are the counts of trophies you have earned in that game. Platinum is 1 if you have the platinum and 0 if you do not.
 
@@ -22,7 +22,7 @@ Yours to fill in. The sync never writes a value into these:
 
 Status, Priority, Rating, Price paid, Notes, Goal/Reminder, Hidden.
 
-If you already have a sheet that is missing some of these columns, the script adds only the ones that are absent and leaves your existing columns where they are, so nothing shifts out of alignment.
+If you already have a sheet that is missing some of these columns, the script adds only the ones that are absent and leaves your existing columns where they are, so nothing shifts out of alignment. Columns that have been renamed between versions are renamed in place rather than duplicated, so the data underneath them is kept.
 
 ## Formatting
 
@@ -38,7 +38,11 @@ The sync sets these up so the sheet stays readable as it grows.
 8. The banner and header rows are frozen, so they stay visible while scrolling.
 9. Rows alternate between white and light grey.
 10. Progress % displays as a percentage, and Playtime displays to one decimal. Both are still numbers underneath, so sorting and the colour scale keep working.
-11. Rows are 150px tall to give the cover art room, with a 25px header. Cover, Game, and Platform have fixed widths.
+11. Rows are 150px tall to give the cover art room, with a 50px header that wraps its titles.
+12. Everything is vertically centred in its row.
+13. Narrow columns stay narrow: %, Hrs. Played and Hours to beat are 50px with centred text, the trophy columns are 25px, and Platform is 25px with its label rotated 90 degrees to fit.
+14. Game, Notes, and Goal/Reminder wrap their text rather than spilling sideways.
+15. Each trophy column's header cell is tinted with its grade colour.
 
 ## Running through GitHub Actions
 

@@ -25,7 +25,7 @@ const COVER_W = num("COVER_W", 150);      // Cover column width, pixels
 const GAME_W = num("GAME_W", 150);        // Game column width
 const PLATFORM_W = num("PLATFORM_W", 25); // Platform column width
 const ROW_HEIGHT = num("ROW_HEIGHT", 150);
-const HEADER_HEIGHT = num("HEADER_HEIGHT", 25);
+const HEADER_HEIGHT = num("HEADER_HEIGHT", 50);
 
 // Options offered by the Status dropdown, in order. Override with a
 // comma-separated list to suit how you actually track things.
@@ -54,18 +54,30 @@ const HLTB_DELAY_MS = num("HLTB_DELAY_MS", 400);
 // rather than dropping in the square trophy icon.
 const FALLBACK_TO_ICON = false;
 
+// Renaming a column would otherwise look like "old one missing, add a new one",
+// which would strand the data in the old column. Applied to the sheet's header
+// before the missing-column check.
+const HEADER_RENAMES = {
+  "Progress %": "%",
+  "Playtime (hrs)": "Hrs. Played",
+};
+
+const PROGRESS_H = "%";
+const PLAYTIME_H = "Hrs. Played";
+
 const AUTO_HEADERS = [
   "Cover",
   "Game",
   "Platform",
   "Source",
-  "Progress %",
+  PROGRESS_H,
   "Bronze",
   "Silver",
   "Gold",
   "Platinum",
-  "Playtime (hrs)",
+  PLAYTIME_H,
   "Hours to beat",
+  "First played",
   "Last played",
   "Sort order",
 ];
@@ -242,6 +254,7 @@ async function enrichPlayed(auth, games) {
         };
         entry.playtime = durationToHours(t.playDuration);
         entry.lastPlayed = dateOnly(t.lastPlayedDateTime);
+        entry.firstPlayed = dateOnly(t.firstPlayedDateTime);
         entry.service = t.service || "";
         if (t.concept && t.concept.id) entry.conceptId = t.concept.id;
         if (!entry.platform) entry.platform = platformFromCategory(t.category);
@@ -408,6 +421,9 @@ async function readSheet(sheets) {
   // Keep whatever column order the sheet already uses and append only what is
   // missing. Replacing the header wholesale would silently shift every existing
   // row out of alignment the first time a new column is introduced.
+  if (header) {
+    header = header.map((h) => HEADER_RENAMES[h] || h);
+  }
   if (!header || header.filter(Boolean).length === 0) {
     header = [...ALL_HEADERS];
   } else {
@@ -445,9 +461,12 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
     if (idx["Source"] !== -1) {
       row[idx["Source"]] = sourceLabel(g.service, g.purchased);
     }
-    row[idx["Progress %"]] = typeof g.progress === "number" ? g.progress : 0;
-    row[idx["Playtime (hrs)"]] = g.playtime ?? "";
+    row[idx[PROGRESS_H]] = typeof g.progress === "number" ? g.progress : 0;
+    row[idx[PLAYTIME_H]] = g.playtime ?? "";
     row[idx["Last played"]] = g.lastPlayed || "";
+    if (idx["First played"] !== -1) {
+      row[idx["First played"]] = g.firstPlayed || "";
+    }
     for (const h of TROPHY_HEADERS) {
       const i = idx[h];
       if (i === -1) continue;
@@ -541,6 +560,15 @@ const rgb = (r, g, b) => ({ red: r / 255, green: g / 255, blue: b / 255 });
 const PRICE_FORMAT = process.env.PRICE_FORMAT || "0.00";
 
 const PLATINUM_BG = rgb(173, 216, 230); // light blue, the platinum convention
+
+// Trophy-grade colours for the header cells of the four trophy columns.
+// Platinum reuses the same light blue PlayStation itself uses for the grade.
+const TROPHY_COLORS = {
+  Bronze: rgb(205, 127, 50),
+  Silver: rgb(192, 192, 192),
+  Gold: rgb(255, 215, 0),
+  Platinum: PLATINUM_BG,
+};
 const PROGRESS_LOW = rgb(230, 124, 115);
 const PROGRESS_MID = rgb(255, 214, 102);
 const PROGRESS_HIGH = rgb(87, 187, 138);
@@ -581,6 +609,77 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
   sizeCol("Game", GAME_W);
   sizeCol("Platform", PLATFORM_W);
   sizeCol("Sort order", 70);
+  sizeCol(PROGRESS_H, 50);
+  sizeCol(PLAYTIME_H, 50);
+  sizeCol("Hours to beat", 50);
+  sizeCol("First played", 75);
+  sizeCol("Last played", 75);
+  for (const t of TROPHY_HEADERS) sizeCol(t, 25);
+
+  // Everything sits in the vertical middle of its row. Done first and as a
+  // single field so the per-column rules below layer on top of it.
+  requests.push({
+    repeatCell: {
+      range: { sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: header.length },
+      cell: { userEnteredFormat: { verticalAlignment: "MIDDLE" } },
+      fields: "userEnteredFormat.verticalAlignment",
+    },
+  });
+
+  // Per-column presentation. Each call names only the fields it sets, so these
+  // never clobber one another or anything set by hand in the sheet.
+  const styleCol = (name, fmt, fields, fromRow = 2, toRow) => {
+    const i = col(name);
+    if (i === -1) return;
+    const range = {
+      sheetId,
+      startRowIndex: fromRow,
+      startColumnIndex: i,
+      endColumnIndex: i + 1,
+    };
+    if (toRow !== undefined) range.endRowIndex = toRow;
+    requests.push({
+      repeatCell: {
+        range,
+        cell: { userEnteredFormat: fmt },
+        fields: fields.map((f) => `userEnteredFormat.${f}`).join(","),
+      },
+    });
+  };
+
+  const CENTER = [{ horizontalAlignment: "CENTER" }, ["horizontalAlignment"]];
+  const WRAP = [{ wrapStrategy: "WRAP" }, ["wrapStrategy"]];
+
+  styleCol(PROGRESS_H, ...CENTER);
+  styleCol(PLAYTIME_H, ...CENTER);
+  styleCol("Hours to beat", ...CENTER);
+  styleCol("Game", ...WRAP);
+  styleCol("Notes", ...WRAP);
+  styleCol("Goal/Reminder", ...WRAP);
+
+  // Platform is a 25px column, so the label is turned on its side to fit.
+  styleCol(
+    "Platform",
+    { textRotation: { angle: 90 } },
+    ["textRotation"]
+  );
+
+  // The header row gets room to breathe and wraps, since several columns are
+  // now narrower than their own titles.
+  requests.push({
+    repeatCell: {
+      range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: header.length },
+      cell: {
+        userEnteredFormat: { wrapStrategy: "WRAP", verticalAlignment: "MIDDLE" },
+      },
+      fields: "userEnteredFormat.wrapStrategy,userEnteredFormat.verticalAlignment",
+    },
+  });
+
+  // Tint each trophy column's header cell with its grade colour.
+  for (const [name, color] of Object.entries(TROPHY_COLORS)) {
+    styleCol(name, { backgroundColor: color }, ["backgroundColor"], 1, 2);
+  }
 
   // Keep the header on screen while scrolling a few hundred rows.
   requests.push({
@@ -610,8 +709,8 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
   };
   // PSN reports progress as 0-100, so append a literal % rather than using a
   // PERCENT format, which would multiply by 100 again and show "4200%".
-  numberFormat("Progress %", '0"%"');
-  numberFormat("Playtime (hrs)", "0.0");
+  numberFormat(PROGRESS_H, '0"%"');
+  numberFormat(PLAYTIME_H, "0.0");
   numberFormat("Price paid", PRICE_FORMAT);
   numberFormat("Priority", "0");
 
@@ -682,7 +781,7 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
     requests.push({ deleteConditionalFormatRule: { sheetId, index: i } });
   }
 
-  const progressCol = col("Progress %");
+  const progressCol = col(PROGRESS_H);
   const platinumCol = col("Platinum");
   if (progressCol !== -1) {
     // No endRowIndex: the rules cover the whole column, including rows that
