@@ -94,13 +94,31 @@ const PERSONAL_HEADERS = [
 const ALL_HEADERS = [...AUTO_HEADERS, ...PERSONAL_HEADERS];
 
 // ---- Helpers ----------------------------------------------------------------
+const ROMAN_NUMERALS = [
+  "i", "ii", "iii", "iv", "v", "vi",
+  "vii", "viii", "ix", "x", "xi", "xii",
+];
+
+// PSN sometimes writes a numeral as a single Unicode Roman character — "DARK
+// SOULS Ⅱ" uses U+2161, not two letter I's. The alphanumeric strip below would
+// delete it outright, so the same game ends up on two rows under two keys.
+// U+2160-216B are the uppercase forms and U+2170-217B the lowercase.
+const romanToAscii = (s) =>
+  s.replace(/[\u2160-\u216B\u2170-\u217B]/g, (ch) => {
+    const cp = ch.codePointAt(0);
+    const base = cp >= 0x2170 ? 0x2170 : 0x2160;
+    return ROMAN_NUMERALS[cp - base];
+  });
+
 const norm = (s) =>
-  (s || "")
-    .toString()
+  romanToAscii((s || "").toString())
     .toLowerCase()
     .replace(/[™®©:]/g, "")
     .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+    .trim()
+    // PS3- and PS4-era trophy lists come back suffixed, e.g. "Apex Legends
+    // Trophies" or "Vigor Trophy Set". Same game as the unsuffixed entry.
+    .replace(/\s+(trophies|trophy set)$/, "");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -490,9 +508,31 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
   };
 
   const rowByKey = new Map();
+  const collisions = new Map();
   for (const r of body) {
     const key = norm(gameNameFromCell(r[gameCol]));
-    if (key) rowByKey.set(key, r);
+    if (!key) continue;
+    if (rowByKey.has(key)) {
+      const names = collisions.get(key) || [
+        gameNameFromCell(rowByKey.get(key)[gameCol]),
+      ];
+      names.push(gameNameFromCell(r[gameCol]));
+      collisions.set(key, names);
+    }
+    rowByKey.set(key, r);
+  }
+  // Rows that already exist can't be merged for you: each may carry its own
+  // notes and rating, and picking a winner isn't the script's call. Only one of
+  // each pair gets updated from here on, so name them plainly.
+  if (collisions.size) {
+    console.warn(
+      `\n${collisions.size} pair(s) of rows now resolve to the same game. ` +
+        `Only one of each is being kept up to date — delete the other by hand:`
+    );
+    for (const names of collisions.values()) {
+      console.warn(`  - ${names.join("   ==   ")}`);
+    }
+    console.warn("");
   }
 
   for (const [key, g] of games) {

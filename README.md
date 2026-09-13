@@ -136,6 +136,7 @@ If a scheduled run fails, the workflow opens an issue on your repo with a link t
 
 Don't edit the sheet while a sync is working. Because the script reads the whole tab and writes it all back, any edits will be overwritten.
 HowLongToBeat is not always reliable for the purposes of this project, and access may break in the future.
+PlayStation does not name games consistently between its own endpoints, so the same game can arrive twice under two different titles. Trophy-list suffixes ("Apex Legends Trophies") and Unicode numerals ("DARK SOULS Ⅱ") are normalised away, but a game whose trophy name differs outright from its store name will still land on two rows. When the sync spots two existing rows that resolve to the same game it names them in the run log, since only one of the pair will be kept up to date.
 Deleting a row is not the way to hide a game from your list, since the next sync will just add it back. Tick the Hidden checkbox instead.
 Cover art is drawn directly from Sony's servers. Older titles without cover art will appear blank.
 Sony does not publish key art for every title. Where it is missing, the sheet keeps whatever cover it already had rather than blanking the cell.
