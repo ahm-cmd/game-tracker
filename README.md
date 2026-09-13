@@ -1,149 +1,79 @@
-# Game Tracker
+Keeps a Google Sheet synced with your PlayStation library.
+Synced elements include: cover art, trophy progress, time played, and an estimate of how long each game takes to finish.
+Manual elements include: status, rating, and notes.
 
-Keeps a Google Sheet in sync with your PlayStation library — cover art, trophy
-progress, playtime, and an estimate of how long each game takes to finish — while
-leaving your own columns (status, rating, notes) untouched.
+Games that appear on both PS4 and PS5 are recorded in a single row.
 
-It runs itself. A GitHub Action fires once a day; you never open a terminal after setup.
+## Running through GitHub Actions
 
-<!-- TODO: screenshot your sheet, save it as docs/screenshot.png, and uncomment
-     the line below. A picture of the cover-art grid is the entire pitch. -->
-<!-- ![The synced sheet](docs/screenshot.png) -->
-
-## What lands in the sheet
-
-Seven columns are written by the sync and will be overwritten on every run:
-
-| Column | Source |
-|---|---|
-| Cover | PlayStation key art, embedded with `=IMAGE()` |
-| Game | PSN title name |
-| Platform | PS5 / PS4 / PS3 / PS Vita |
-| Progress % | Trophy completion |
-| Playtime (hrs) | PSN play duration |
-| Hours to beat | [HowLongToBeat](https://howlongtobeat.com) main-story estimate |
-| Last played | Date only |
-
-Four more are yours. The sync never writes to them:
-
-**Status** · **Rating** · **Notes** · **Goal/Reminder**
-
-Games are matched between runs by a normalized title, so your notes stay attached
-to the right row even when PSN changes a name's punctuation. A game that appears
-on both PS4 and PS5 collapses into a single row.
-
-## Setup
-
-Roughly 15 minutes, most of it in Google Cloud. You need a Google account and a
-PlayStation account.
-
-### 1. Create the sheet
-
-Make a new Google Sheet. Rename the first tab to **`Games`** (exact, case-sensitive).
-Put these headers in row 1:
-
-```
-Cover | Game | Platform | Progress % | Playtime (hrs) | Hours to beat | Last played | Status | Rating | Notes | Goal/Reminder
-```
-
-Order doesn't matter and you can add extra columns of your own — the script finds
-columns by name. If row 1 is empty or missing any of the eleven, the script writes
-the full header itself on the first run.
-
-From the sheet's URL, grab the ID:
-
+1. Create a new Google Sheet. Rename the first tab to "Games".
+2. Grab the Sheet's URL ID and save it for later.
 ```
 https://docs.google.com/spreadsheets/d/<THIS_IS_YOUR_SHEET_ID>/edit
 ```
-
-### 2. Create a Google service account
-
-The script writes to your sheet as a robot user, not as you.
-
-1. Open the [Google Cloud console](https://console.cloud.google.com/) and create a project.
-2. Enable the **Google Sheets API** for it (APIs & Services → Library → search "Sheets").
-3. APIs & Services → Credentials → **Create credentials** → **Service account**. Name it anything; skip the optional role and access steps.
-4. Open the new service account → **Keys** → Add key → **Create new key** → **JSON**. A file downloads. This file is a credential — treat it like a password.
-5. Copy the `client_email` from that file (it looks like `something@your-project.iam.gserviceaccount.com`).
-6. Back in your Google Sheet, click **Share** and give that email **Editor** access.
-
-Step 6 is the one people miss. Without it every run fails with a permission error.
-
-### 3. Get your NPSSO token
-
-This is your PlayStation session token.
-
-1. Log in at [playstation.com](https://www.playstation.com).
-2. In the same browser, open <https://ca.account.sony.com/api/v1/ssocookie>.
-3. Copy the 64-character value of `npsso`.
-
-> **It expires about every two months.** When your sync starts failing, this is
-> almost always why — repeat these three steps and update the secret.
-
-### 4. Wire it up
-
-Fork this repo, then add three repository secrets under
-**Settings → Secrets and variables → Actions**:
-
-| Secret | Value |
-|---|---|
-| `NPSSO` | The token from step 3 |
-| `SHEET_ID` | The ID from step 1 |
-| `GOOGLE_SERVICE_ACCOUNT_KEY` | The **entire contents** of the JSON key file from step 2 |
-
-Then run it once by hand: **Actions → Sync PSN games → Run workflow**. The first run
-takes a few minutes because every game needs a HowLongToBeat lookup; later runs reuse
-the values already in the sheet and finish in about two.
-
-After that it runs daily at 08:00 UTC. Change the `cron` line in
-[`.github/workflows/sync.yml`](.github/workflows/sync.yml) if you'd rather it ran
-at another time.
+3. Create a Google service account.
+4. Open the [Google Cloud console](https://console.cloud.google.com/). Create a project.
+5. Enable Google Sheets API: **APIs & Services > Library > search "Sheets"**.
+6. Open the new service account > **Keys > Add key > Create new key > JSON**. Save this file for later.
+7. Copy the "client_email" from that file:
+```
+"something@your-project.iam.gserviceaccount.com"
+```
+8. In your Sheet, click **Share** and give Editor access to your "client_email" address.
+9. Log in at [Playstation](https://www.playstation.com).
+10. Now that you've logged in, open (https://ca.account.sony.com/api/v1/ssocookie).
+11. Copy the 64-character "npsso" value and save it for later. This is your PlayStation session token, and could be used to access your account if leaked. *Keep it private.*
+12. Note that this value expires every two months or so, so you will need to remember to retrieve a new NPSSO token when this one expires.
+13. Fork this repo. You will now add three repository secrets.
+14. In your new repo, go to **Settings > Secrets and variables > Actions**.
+15. Enter three new secrets, named exactly as seen below.
+16. 'NPSSO': the token from step 11.
+17. 'SHEET_ID': the URL ID from step 2.
+18. 'GOOGLE_SERVICE_ACCOUNT_KEY': the entire contents of the JSON file from step 6.
+19. Run the Workflow once by hand. In your forked repo, **Actions > Sync PSN games > Run workflow**. It may take a few minutes.
+20. Now that you've run it once, the Workflow will run once daily at 8:00 UTC. This time is configurable in the "cron" line in [.github/workflows/sync.yml](.github/workflows/sync.yml).
 
 ## Running locally
 
-Node 20.6 or newer.
+Node 20.6. or newer is required.
 
 ```bash
-npm ci
-cp .env.example .env   # then fill it in
-node --env-file=.env sync.js
+npm ci # "clean install command" that reads package-lock.json and installs those versions
+cp .env.example .env # this makes a file, .env, from the template .env.example. Open. env in a text editor and fill in the three "Secrets" listed above: NPSSO, SHEET_ID, and GOOGLE_SERVICE_ACCOUNT_KEY
+node --env-file=.env sync.js # runs the script itself
 ```
+After setup, you can run ```npm run sync:local``` for convenience.
 
 ## Configuration
 
-Everything optional, set as environment variables (or as repository *variables*
-in the Actions settings):
+Several files you may want to adjust.
 
-| Variable | Default | Effect |
-|---|---|---|
-| `SHEET_TAB` | `Games` | Which tab to write to |
-| `COVER_W` / `COVER_H` | `99` / `132` | Cover art cell size, in pixels |
-| `HLTB_ENABLED` | `1` | Set to `0` to skip HowLongToBeat lookups entirely |
-| `HLTB_DELAY_MS` | `400` | Pause between HowLongToBeat lookups |
+Variable: "SHEET_TAB"
+Default: "Games"
+Note: Determines the tab name in the shared Sheet that the Action's output will write to.
+
+Variable: Cover_W / Cover_H
+Default: 99 / 132
+Note: Determines cover art cell size in pixels
+
+Variable: HTLB_ENABLED
+Default: 1
+Note: Set to 0 to skip HowLongToBeat lookups
+
+Variable: HLTB_DELAY_MS
+Default: 400
+Note: Pause between each HLTB lookup. Lowering this value may result in rejected calls to HLTB.
 
 ## How it works
 
-```
-PSN trophy titles ─┐
-PSN played games  ─┼─► merge by normalized title ─► HowLongToBeat ─► Google Sheet
-PSN purchases     ─┘
-```
+On first run, all necessary rows and titles populate the "Game" sheet. Trophy titles, played games, and purchases import via your PlayStation session token. All entries are merged by normalized titles. On subsequent runs, existing rows are updated in place and rows are only created when new games have been added to your PlayStation library since the last run. HowLongToBeat values are never updated given the slow and unreliable nature of calls to its database.
 
-Three PSN endpoints are merged because none is complete on its own: trophy titles
-give completion percentages, played games give playtime and the high-resolution key
-art, and purchases catch games you own but have never launched.
+## Restrictions
 
-The sheet is read before it's written, so existing rows are updated in place and
-only genuinely new games get appended. HowLongToBeat is the slow, flaky dependency,
-so any value already sitting in the sheet is reused rather than looked up again —
-which also means you can correct a wrong estimate by hand and it will stick.
-
-## Caveats
-
-- **Don't edit the sheet while a sync is running.** The script reads the whole tab, then writes the whole tab back. An edit made in between will be overwritten.
-- HowLongToBeat scrapes an unofficial source. It breaks occasionally; when it does, the run logs how many lookups succeeded and continues without those values.
-- Deleting a row doesn't blacklist the game — the next sync will add it back.
-- Cover art is PlayStation key art. Some older titles have none, and those cells stay blank.
+Don't edit the sheet while a sync is working. Because the script reads the whole tab and writes it all back, any edits will be overwritten.
+HowLongToBeat is not always reliable for the purposes of this project, and access may break in the future.
+Deleting a row is not the way to blacklist a game or hide it from your list. This may come in a future update.
+Cover art is drawn directly from Sony's servers. Older titles without cover art will appear blank.
 
 ## Built with
 
