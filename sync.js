@@ -8,14 +8,24 @@ import {
 import { google } from "googleapis";
 
 // ---- Config ----------------------------------------------------------------
+// Everything here is overridable by environment variable; see README.
+const num = (name, fallback) => {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+};
+
 const SHEET_TAB = process.env.SHEET_TAB || "Games";
 
 // Cover art sizing. Mode 1 = fit inside the cell without distortion.
 // (Switch to 4 to force an exact box, at the cost of stretching odd shapes.)
 const COVER_MODE = 1;
-const COVER_H = 132; // cell height in pixels
-const COVER_W = 99;  // cell width in pixels (bump both for larger art)
+const COVER_H = num("COVER_H", 132); // cell height in pixels
+const COVER_W = num("COVER_W", 99);  // cell width in pixels
 const CELL_PAD = 6;
+
+// HowLongToBeat is the slow, flaky step. HLTB_ENABLED=0 skips it entirely.
+const HLTB_ENABLED = process.env.HLTB_ENABLED !== "0";
+const HLTB_DELAY_MS = num("HLTB_DELAY_MS", 400);
 // Covers come from PlayStation key art. If none exists, leave the cell blank
 // rather than dropping in the square trophy icon.
 const FALLBACK_TO_ICON = false;
@@ -89,9 +99,17 @@ function coverFormula(url) {
 // ---- PSN pulls --------------------------------------------------------------
 async function getAuth() {
   const npsso = process.env.NPSSO;
-  if (!npsso) throw new Error("Missing NPSSO env var.");
-  const accessCode = await exchangeNpssoForAccessCode(npsso);
-  return exchangeAccessCodeForAuthTokens(accessCode);
+  try {
+    const accessCode = await exchangeNpssoForAccessCode(npsso);
+    return await exchangeAccessCodeForAuthTokens(accessCode);
+  } catch {
+    // Overwhelmingly the cause: NPSSO tokens expire roughly every two months.
+    throw new Error(
+      "PSN sign-in failed — your NPSSO token has expired or is invalid. Log in " +
+        "at playstation.com, open https://ca.account.sony.com/api/v1/ssocookie, " +
+        "and update the NPSSO secret with the fresh value."
+    );
+  }
 }
 
 async function pullTrophyTitles(auth) {
@@ -204,6 +222,13 @@ async function enrichPurchased(auth, games) {
 async function enrichHltb(games, knownHours) {
   let attempted = 0;
   let matched = 0;
+  if (!HLTB_ENABLED) {
+    for (const [key, g] of games) {
+      if (knownHours.has(key)) g.hoursToBeat = knownHours.get(key);
+    }
+    console.log("HLTB: disabled (HLTB_ENABLED=0); reused existing sheet values.");
+    return;
+  }
   try {
     const mod = await import("howlongtobeat-core");
     const HowLongToBeat =
@@ -232,7 +257,7 @@ async function enrichHltb(games, knownHours) {
       } catch {
         // one bad lookup shouldn't stop the rest
       }
-      await sleep(400);
+      await sleep(HLTB_DELAY_MS);
     }
   } catch (e) {
     console.warn("HowLongToBeat unavailable:", e.message);
@@ -242,7 +267,15 @@ async function enrichHltb(games, knownHours) {
 
 // ---- Google Sheets ----------------------------------------------------------
 function getSheetsClient() {
-  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+  let credentials;
+  try {
+    credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+  } catch {
+    throw new Error(
+      "GOOGLE_SERVICE_ACCOUNT_KEY is not valid JSON. It should be the entire " +
+        "contents of the service-account key file, braces included."
+    );
+  }
   const auth = new google.auth.GoogleAuth({
     credentials,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
@@ -258,13 +291,20 @@ async function getSheetId(sheets, spreadsheetId) {
   const found = (meta.data.sheets || []).find(
     (s) => s.properties.title === SHEET_TAB
   );
-  if (!found) throw new Error(`Tab "${SHEET_TAB}" not found.`);
+  if (!found) {
+    const names = (meta.data.sheets || [])
+      .map((s) => `"${s.properties.title}"`)
+      .join(", ");
+    throw new Error(
+      `No tab named "${SHEET_TAB}" in this spreadsheet. Found: ${names}. ` +
+        `Rename a tab to "${SHEET_TAB}" or set SHEET_TAB to one of these.`
+    );
+  }
   return found.properties.sheetId;
 }
 
 async function readSheet(sheets) {
   const spreadsheetId = process.env.SHEET_ID;
-  if (!spreadsheetId) throw new Error("Missing SHEET_ID env var.");
   const read = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: SHEET_TAB,
@@ -378,7 +418,21 @@ async function sizeCovers(sheets, spreadsheetId, sheetId, dataRowCount) {
 }
 
 // ---- Run --------------------------------------------------------------------
+function preflight() {
+  const required = ["NPSSO", "SHEET_ID", "GOOGLE_SERVICE_ACCOUNT_KEY"];
+  const missing = required.filter((k) => !process.env[k]);
+  if (missing.length) {
+    throw new Error(
+      `Missing required environment variable(s): ${missing.join(", ")}. ` +
+        `Running locally? Copy .env.example to .env and use ` +
+        `\`node --env-file=.env sync.js\`. Running in GitHub Actions? Add them ` +
+        `under Settings > Secrets and variables > Actions. See the README.`
+    );
+  }
+}
+
 async function main() {
+  preflight();
   const auth = await getAuth();
   const sheets = getSheetsClient();
 
@@ -396,6 +450,7 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e);
+  console.error(`\nSync failed: ${e.message}\n`);
+  if (process.env.DEBUG) console.error(e);
   process.exit(1);
 });
