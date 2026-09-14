@@ -387,11 +387,29 @@ async function enrichPlayed(auth, games) {
       coverUrl: "",
       trophies: null,
     };
-    entry.playtime = durationToHours(t.playDuration);
-    entry.lastPlayed = dateOnly(t.lastPlayedDateTime);
-    entry.firstPlayed = dateOnly(t.firstPlayedDateTime);
-    entry.service = t.service || "";
-    if (typeof t.playCount === "number") entry.playCount = t.playCount;
+    // A game can arrive as several PSN entries — a PS4 and a PS5 edition, say —
+    // that all land on one row. Overwriting meant the last one seen won, so a
+    // brief PS5 launch could bury a hundred hours logged on PS4. Accumulate
+    // instead: hours and launches add up, first played is the earliest seen and
+    // last played the most recent.
+    const hrs = durationToHours(t.playDuration);
+    if (hrs !== "") {
+      const running = typeof entry.playtime === "number" ? entry.playtime : 0;
+      entry.playtime = Math.round((running + hrs) * 10) / 10;
+    }
+    const lastSeen = dateOnly(t.lastPlayedDateTime);
+    if (lastSeen && (!entry.lastPlayed || lastSeen > entry.lastPlayed)) {
+      entry.lastPlayed = lastSeen;
+    }
+    const firstSeen = dateOnly(t.firstPlayedDateTime);
+    if (firstSeen && (!entry.firstPlayed || firstSeen < entry.firstPlayed)) {
+      entry.firstPlayed = firstSeen;
+    }
+    // Owning a game outright beats having it through the subscription.
+    if (t.service && entry.service !== "none_purchased") entry.service = t.service;
+    if (typeof t.playCount === "number") {
+      entry.playCount = (entry.playCount || 0) + t.playCount;
+    }
     if (t.concept && t.concept.id) entry.conceptId = t.concept.id;
     if (!entry.platform) entry.platform = platformFromCategory(t.category);
     const cov = pickCover(t);
@@ -1041,6 +1059,22 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
     });
   }
 
+  // Validation applied before the banner existed is anchored to the grid, not
+  // to the content, so when the banner pushed everything down a row it ended up
+  // covering the header — which is why "Status" and "Rating" show as errors in
+  // their own header cells. Clear the top two rows outright before re-applying.
+  requests.push({
+    setDataValidation: {
+      range: {
+        sheetId,
+        startRowIndex: 0,
+        endRowIndex: 2,
+        startColumnIndex: 0,
+        endColumnIndex: header.length,
+      },
+    },
+  });
+
   // Dropdowns. strict:false warns on values outside the list rather than
   // rejecting them, so nothing already in a column gets blocked.
   const dropdown = (name, options) => {
@@ -1088,8 +1122,15 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
     // Set the filter once and then leave it alone: re-applying it on every run
     // would throw away whatever sort or extra criteria you'd set up. Delete the
     // filter in Sheets and the next sync will recreate it from scratch.
-    const hasFilter = Boolean(sheet && sheet.basicFilter);
-    if (!hasFilter) {
+    // Same problem as the validation above: a filter created before the banner
+    // starts on the banner row and treats it as the header. Leave an aligned
+    // filter alone so a sort you set survives, but rebuild a misaligned one.
+    const existingFilter = sheet && sheet.basicFilter;
+    const filterAligned =
+      existingFilter &&
+      existingFilter.range &&
+      existingFilter.range.startRowIndex === 1;
+    if (!filterAligned) {
       requests.push({
         setBasicFilter: {
           filter: {
