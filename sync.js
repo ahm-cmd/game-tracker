@@ -142,27 +142,48 @@ const ROMAN_TO_NUM = Object.fromEntries(
 // "PlayStation 4" and "PS5" are platform labels, not part of a game's name.
 const PLATFORM_NOISE = /\b(?:playstation|ps)\s*[345]\b/g;
 
-// Which entry in a series a title is: 0 for the first game, 2 for a sequel, and
-// so on. Sony sometimes points a store entry at the wrong game's trophy set —
-// "SPLITGATE: Arena Reloaded" resolves to Splitgate 2's — and merging on that
-// would fold a sequel's hours into the original. Numbers have to agree.
-function sequelNumber(normalisedName) {
-  const tokens = normalisedName
+// "Years 1-4" is a range of games in a collection, not a series number.
+const YEAR_RANGE = /\byears?(?:\s+\d+)+/g;
+
+const seriesTokens = (normalisedName) =>
+  normalisedName
     .replace(PLATFORM_NOISE, " ")
+    .replace(YEAR_RANGE, " ")
     .split(/\s+/)
     .filter(Boolean);
-  for (let i = tokens.length - 1; i >= 0; i--) {
-    const t = tokens[i];
-    if (/^\d{1,2}$/.test(t)) return Number(t);
-    if (ROMAN_TO_NUM[t]) return ROMAN_TO_NUM[t];
+
+// Every number in a title, as a comparable string. Roman numerals count.
+const numbersIn = (tokens) =>
+  tokens
+    .map((t) => (/^\d{1,2}$/.test(t) ? Number(t) : ROMAN_TO_NUM[t] || null))
+    .filter((n) => n !== null)
+    .sort((a, b) => a - b)
+    .join(",");
+
+// Sony sometimes points a store entry at the wrong game's trophy set — Splitgate
+// Arena Reloaded resolves to Splitgate 2's — so a merge that would fold a sequel
+// into the original has to be refused.
+//
+// The veto is deliberately narrow: it only fires when the two names start the
+// same way and then disagree about a number, which is what a sequel looks like.
+// Names that diverge from the first word ("Skyrim" against "The Elder Scrolls V:
+// Skyrim Special Edition") are left to the trophy-set match, which is better
+// evidence than anything guessable from the text.
+function sameSeriesEntry(nameA, nameB) {
+  const a = seriesTokens(nameA);
+  const b = seriesTokens(nameB);
+  let shared = 0;
+  while (shared < a.length && shared < b.length && a[shared] === b[shared]) {
+    shared++;
   }
-  return 0;
+  if (shared === 0) return true;
+  return numbersIn(a) === numbersIn(b);
 }
 
 const norm = (s) =>
   romanToAscii((s || "").toString())
     .toLowerCase()
-    .replace(/[™®©:]/g, "")
+    .replace(/[™®©:]/g, " ")
     .replace(/[^a-z0-9]+/g, " ")
     .trim()
     // PS3- and PS4-era trophy lists come back suffixed, e.g. "Apex Legends
@@ -405,7 +426,7 @@ async function enrichPlayed(auth, games) {
         if (!existingKey) continue;
         const target = games.get(existingKey);
         const targetName = (target && target.name) || existingKey;
-        if (sequelNumber(norm(t.name)) !== sequelNumber(norm(targetName))) {
+        if (!sameSeriesEntry(norm(t.name), norm(targetName))) {
           rejected.push([t.name, targetName]);
           continue;
         }
