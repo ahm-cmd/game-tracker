@@ -365,7 +365,10 @@ async function enrichPlayed(auth, games) {
     auth,
     unmatched.map((t) => t.titleId)
   );
-  let rescued = 0;
+  const merges = [];
+  // How many PlayStation entries fed each game, so a row built from more than
+  // one is visible rather than having to be inferred.
+  const contributions = new Map();
 
   for (const t of played) {
     let key = norm(t.name);
@@ -375,8 +378,9 @@ async function enrichPlayed(auth, games) {
       const npComm = bridged.get(t.titleId);
       const existingKey = npComm && byNpComm.get(npComm);
       if (existingKey) {
+        const target = games.get(existingKey);
+        merges.push([t.name, (target && target.name) || existingKey]);
         key = existingKey;
-        rescued++;
       }
     }
     const entry = games.get(key) || {
@@ -415,13 +419,29 @@ async function enrichPlayed(auth, games) {
     const cov = pickCover(t);
     if (cov) entry.coverUrl = cov; // high-res PSN key art
     games.set(key, entry);
+    contributions.set(key, (contributions.get(key) || 0) + 1);
   }
 
   if (TITLE_BRIDGE_ENABLED) {
     console.log(
       `Title bridge: resolved ${bridged.size} of ${unmatched.length} unmatched ` +
-        `titles, merging ${rescued} that would otherwise have been duplicate rows.`
+        `titles, merging ${merges.length} into an existing trophy set.`
     );
+    for (const [from, to] of merges) {
+      console.log(`  merged "${from}"  ->  "${to}"`);
+    }
+  }
+
+  const combined = [...contributions].filter(([, n]) => n > 1);
+  if (combined.length) {
+    console.log(`${combined.length} game(s) built from several PlayStation entries:`);
+    for (const [key, n] of combined) {
+      const g = games.get(key);
+      console.log(
+        `  ${g.name}: ${n} entries -> ${g.playtime}h, ${g.playCount ?? 0} plays, ` +
+          `first ${g.firstPlayed || "?"}, last ${g.lastPlayed || "?"}`
+      );
+    }
   }
 }
 
