@@ -135,6 +135,30 @@ const romanToAscii = (s) =>
     return ROMAN_NUMERALS[cp - base];
   });
 
+const ROMAN_TO_NUM = Object.fromEntries(
+  ROMAN_NUMERALS.map((r, i) => [r, i + 1])
+);
+
+// "PlayStation 4" and "PS5" are platform labels, not part of a game's name.
+const PLATFORM_NOISE = /\b(?:playstation|ps)\s*[345]\b/g;
+
+// Which entry in a series a title is: 0 for the first game, 2 for a sequel, and
+// so on. Sony sometimes points a store entry at the wrong game's trophy set —
+// "SPLITGATE: Arena Reloaded" resolves to Splitgate 2's — and merging on that
+// would fold a sequel's hours into the original. Numbers have to agree.
+function sequelNumber(normalisedName) {
+  const tokens = normalisedName
+    .replace(PLATFORM_NOISE, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const t = tokens[i];
+    if (/^\d{1,2}$/.test(t)) return Number(t);
+    if (ROMAN_TO_NUM[t]) return ROMAN_TO_NUM[t];
+  }
+  return 0;
+}
+
 const norm = (s) =>
   romanToAscii((s || "").toString())
     .toLowerCase()
@@ -316,10 +340,10 @@ async function bridgeTitleIds(auth, titleIds) {
       for (const row of rows) {
         const npTitleId = row.npTitleId || row.npTitleIds;
         const sets = row.trophyTitles || (row.npCommunicationId ? [row] : []);
-        const first = sets[0];
-        if (npTitleId && first && first.npCommunicationId) {
-          found.set(npTitleId, first.npCommunicationId);
-        }
+        // A store title can map to several trophy sets. Keep them all so the
+        // merge step can reject one and try the next.
+        const ids = sets.map((s) => s && s.npCommunicationId).filter(Boolean);
+        if (npTitleId && ids.length) found.set(npTitleId, ids);
       }
     } catch (e) {
       console.warn(`Title bridge stopped after ${found.size} matches:`, e.message);
@@ -366,6 +390,7 @@ async function enrichPlayed(auth, games) {
     unmatched.map((t) => t.titleId)
   );
   const merges = [];
+  const rejected = [];
   // How many PlayStation entries fed each game, so a row built from more than
   // one is visible rather than having to be inferred.
   const contributions = new Map();
@@ -375,12 +400,18 @@ async function enrichPlayed(auth, games) {
     if (!key) continue;
     if (!games.has(key)) {
       // The same game under the store's name rather than the trophy set's.
-      const npComm = bridged.get(t.titleId);
-      const existingKey = npComm && byNpComm.get(npComm);
-      if (existingKey) {
+      for (const npComm of bridged.get(t.titleId) || []) {
+        const existingKey = byNpComm.get(npComm);
+        if (!existingKey) continue;
         const target = games.get(existingKey);
-        merges.push([t.name, (target && target.name) || existingKey]);
+        const targetName = (target && target.name) || existingKey;
+        if (sequelNumber(norm(t.name)) !== sequelNumber(norm(targetName))) {
+          rejected.push([t.name, targetName]);
+          continue;
+        }
+        merges.push([t.name, targetName]);
         key = existingKey;
+        break;
       }
     }
     const entry = games.get(key) || {
@@ -429,6 +460,9 @@ async function enrichPlayed(auth, games) {
     );
     for (const [from, to] of merges) {
       console.log(`  merged "${from}"  ->  "${to}"`);
+    }
+    for (const [from, to] of rejected) {
+      console.log(`  refused "${from}"  ->  "${to}" (different entry in the series)`);
     }
   }
 
