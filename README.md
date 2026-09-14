@@ -1,5 +1,5 @@
 Keeps a Google Sheet synced with your PlayStation library.
-Synced elements include: cover art, trophy counts by grade, trophy progress, time played, and an estimate of how long each game takes to finish.
+Synced elements include: cover art, trophy counts by grade, trophy progress, time played, PSN ID (for version validation), and an estimate of how long each game takes to finish.
 Manual elements include: status, rating, notes, goal/reminder, and hidden.
 
 ## Columns
