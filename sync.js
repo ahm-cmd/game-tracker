@@ -1,4 +1,5 @@
 import {
+  call,
   exchangeNpssoForAccessCode,
   exchangeAccessCodeForAuthTokens,
   getUserTitles,
@@ -31,7 +32,7 @@ const HEADER_HEIGHT = num("HEADER_HEIGHT", 50);
 // comma-separated list to suit how you actually track things.
 const STATUS_OPTIONS = (
   process.env.STATUS_OPTIONS ||
-  "Backlog,In Queue,Playing,Ongoing,Beaten,Platinum,Dropped"
+  "Backlog,Playing,Ongoing,Beaten,Platinum,Dropped"
 )
   .split(",")
   .map((s) => s.trim())
@@ -42,6 +43,16 @@ const DONE_STATUSES = ["Beaten", "Platinum", "Dropped"];
 
 // Half steps, so a 3.5 is expressible.
 const RATING_OPTIONS = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5];
+
+// PlayStation names the same game differently depending on which endpoint you
+// ask, so a title can arrive twice under two names. This undocumented trophy
+// endpoint maps a store title id to its trophy set, giving the two halves a
+// shared key. Switch it off with TITLE_BRIDGE_ENABLED=0 if it ever misbehaves —
+// the sync then falls back to matching on names alone.
+const TITLE_BRIDGE_ENABLED = process.env.TITLE_BRIDGE_ENABLED !== "0";
+const BRIDGE_BATCH = num("BRIDGE_BATCH", 5);
+const BRIDGE_DELAY_MS = num("BRIDGE_DELAY_MS", 300);
+const TROPHY_API = "https://m.np.playstation.com/api/trophy/v1";
 
 const BANNER_HEIGHT = num("BANNER_HEIGHT", 28);
 // How many cells the timestamp banner spans across the top.
@@ -60,6 +71,10 @@ const FALLBACK_TO_ICON = false;
 const HEADER_RENAMES = {
   "Progress %": "%",
   "Playtime (hrs)": "Hrs. Played",
+  Bronze: "B",
+  Silver: "S",
+  Gold: "G",
+  Platinum: "P",
 };
 
 const PROGRESS_H = "%";
@@ -71,19 +86,27 @@ const AUTO_HEADERS = [
   "Platform",
   "Source",
   PROGRESS_H,
-  "Bronze",
-  "Silver",
-  "Gold",
-  "Platinum",
+  "B",
+  "S",
+  "G",
+  "P",
   "Trophies",
   PLAYTIME_H,
   "Plays",
   "Hours to beat",
   "First played",
   "Last played",
+  "PSN ID",
   "Sort order",
 ];
-const TROPHY_HEADERS = ["Bronze", "Silver", "Gold", "Platinum"];
+const TROPHY_COLUMNS = [
+  { header: "B", grade: "bronze", color: [205, 127, 50] },
+  { header: "S", grade: "silver", color: [192, 192, 192] },
+  { header: "G", grade: "gold", color: [255, 215, 0] },
+  // Platinum keeps the light blue PlayStation itself uses for the grade.
+  { header: "P", grade: "platinum", color: [173, 216, 230] },
+];
+const TROPHY_HEADERS = TROPHY_COLUMNS.map((t) => t.header);
 const PERSONAL_HEADERS = [
   "Status",
   "Priority",
@@ -247,6 +270,7 @@ async function pullTrophyTitles(auth) {
         // PSN reports platinum as 0 or 1 — a title has at most one.
         trophies: t.earnedTrophies || null,
         definedTrophies: t.definedTrophies || null,
+        npComm: t.npCommunicationId || "",
         // Games hidden on the PSN profile itself.
         hidden: t.hiddenFlag === true,
       });
@@ -257,7 +281,57 @@ async function pullTrophyTitles(auth) {
   return games;
 }
 
+// Ask the trophy service which trophy set each store title belongs to.
+// Returns a Map of npTitleId -> npCommunicationId. Any failure returns what it
+// has so far: a missing bridge just means falling back to name matching.
+async function bridgeTitleIds(auth, titleIds) {
+  const found = new Map();
+  if (!TITLE_BRIDGE_ENABLED || titleIds.length === 0) return found;
+
+  let shapeLogged = false;
+  for (let i = 0; i < titleIds.length; i += BRIDGE_BATCH) {
+    const slice = titleIds.slice(i, i + BRIDGE_BATCH);
+    try {
+      const res = await call(
+        {
+          url: `${TROPHY_API}/users/me/titles/trophyTitles?npTitleIds=${slice.join(",")}`,
+        },
+        { accessToken: auth.accessToken }
+      );
+
+      // Undocumented endpoint: accept either shape it might return, and print
+      // the raw keys once so an unexpected response is diagnosable from the log
+      // rather than silently yielding nothing.
+      const rows = res.titles || res.trophyTitles || [];
+      if (!shapeLogged) {
+        shapeLogged = true;
+        if (!Array.isArray(rows) || rows.length === 0) {
+          console.warn(
+            "Title bridge: unrecognised response shape, keys =",
+            Object.keys(res || {}).join(",") || "(none)"
+          );
+        }
+      }
+
+      for (const row of rows) {
+        const npTitleId = row.npTitleId || row.npTitleIds;
+        const sets = row.trophyTitles || (row.npCommunicationId ? [row] : []);
+        const first = sets[0];
+        if (npTitleId && first && first.npCommunicationId) {
+          found.set(npTitleId, first.npCommunicationId);
+        }
+      }
+    } catch (e) {
+      console.warn(`Title bridge stopped after ${found.size} matches:`, e.message);
+      return found;
+    }
+    await sleep(BRIDGE_DELAY_MS);
+  }
+  return found;
+}
+
 async function enrichPlayed(auth, games) {
+  let played = [];
   try {
     const limit = 100;
     let offset = 0;
@@ -268,33 +342,68 @@ async function enrichPlayed(auth, games) {
         { limit, offset }
       );
       const titles = res.titles || [];
-      for (const t of titles) {
-        const key = norm(t.name);
-        if (!key) continue;
-        const entry = games.get(key) || {
-          name: t.name,
-          platform: platformFromCategory(t.category),
-          progress: "",
-          iconUrl: "",
-          coverUrl: "",
-          trophies: null,
-        };
-        entry.playtime = durationToHours(t.playDuration);
-        entry.lastPlayed = dateOnly(t.lastPlayedDateTime);
-        entry.firstPlayed = dateOnly(t.firstPlayedDateTime);
-        entry.service = t.service || "";
-        if (typeof t.playCount === "number") entry.playCount = t.playCount;
-        if (t.concept && t.concept.id) entry.conceptId = t.concept.id;
-        if (!entry.platform) entry.platform = platformFromCategory(t.category);
-        const cov = pickCover(t);
-        if (cov) entry.coverUrl = cov; // high-res PSN key art
-        games.set(key, entry);
-      }
+      played.push(...titles);
       if (titles.length < limit) break;
       offset += limit;
     }
   } catch (e) {
     console.warn("Playtime pull skipped:", e.message);
+    return;
+  }
+
+  // Where the name already matches a trophy title there's nothing to resolve,
+  // so only the leftovers go through the bridge. That's usually a small
+  // fraction of the library and keeps the extra calls down.
+  const byNpComm = new Map();
+  for (const [key, g] of games) {
+    if (g.npComm) byNpComm.set(g.npComm, key);
+  }
+  const unmatched = played.filter(
+    (t) => t.name && !games.has(norm(t.name)) && t.titleId
+  );
+  const bridged = await bridgeTitleIds(
+    auth,
+    unmatched.map((t) => t.titleId)
+  );
+  let rescued = 0;
+
+  for (const t of played) {
+    let key = norm(t.name);
+    if (!key) continue;
+    if (!games.has(key)) {
+      // The same game under the store's name rather than the trophy set's.
+      const npComm = bridged.get(t.titleId);
+      const existingKey = npComm && byNpComm.get(npComm);
+      if (existingKey) {
+        key = existingKey;
+        rescued++;
+      }
+    }
+    const entry = games.get(key) || {
+      name: t.name,
+      platform: platformFromCategory(t.category),
+      progress: "",
+      iconUrl: "",
+      coverUrl: "",
+      trophies: null,
+    };
+    entry.playtime = durationToHours(t.playDuration);
+    entry.lastPlayed = dateOnly(t.lastPlayedDateTime);
+    entry.firstPlayed = dateOnly(t.firstPlayedDateTime);
+    entry.service = t.service || "";
+    if (typeof t.playCount === "number") entry.playCount = t.playCount;
+    if (t.concept && t.concept.id) entry.conceptId = t.concept.id;
+    if (!entry.platform) entry.platform = platformFromCategory(t.category);
+    const cov = pickCover(t);
+    if (cov) entry.coverUrl = cov; // high-res PSN key art
+    games.set(key, entry);
+  }
+
+  if (TITLE_BRIDGE_ENABLED) {
+    console.log(
+      `Title bridge: resolved ${bridged.size} of ${unmatched.length} unmatched ` +
+        `titles, merging ${rescued} that would otherwise have been duplicate rows.`
+    );
   }
 }
 
@@ -495,6 +604,7 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
     if (idx["First played"] !== -1) {
       row[idx["First played"]] = g.firstPlayed || "";
     }
+    if (idx["PSN ID"] !== -1 && g.npComm) row[idx["PSN ID"]] = g.npComm;
     if (idx["Trophies"] !== -1) {
       row[idx["Trophies"]] = g.definedTrophies
         ? `${totalTrophies(g.trophies)} / ${totalTrophies(g.definedTrophies)}`
@@ -509,10 +619,10 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
       const current = String(row[idx["Hidden"]] ?? "").trim().toUpperCase();
       if (current !== "TRUE") row[idx["Hidden"]] = true;
     }
-    for (const h of TROPHY_HEADERS) {
-      const i = idx[h];
+    for (const t of TROPHY_COLUMNS) {
+      const i = idx[t.header];
       if (i === -1) continue;
-      const v = g.trophies ? g.trophies[h.toLowerCase()] : undefined;
+      const v = g.trophies ? g.trophies[t.grade] : undefined;
       row[i] = typeof v === "number" ? v : "";
     }
     if (g.hoursToBeat !== undefined && g.hoursToBeat !== "") {
@@ -532,8 +642,13 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
   };
 
   const rowByKey = new Map();
+  const rowById = new Map();
   const collisions = new Map();
+  const psnIdCol = idx["PSN ID"];
   for (const r of body) {
+    if (psnIdCol !== -1 && r[psnIdCol]) {
+      rowById.set(String(r[psnIdCol]).trim(), r);
+    }
     const key = norm(gameNameFromCell(r[gameCol]));
     if (!key) continue;
     if (rowByKey.has(key)) {
@@ -559,15 +674,43 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
     console.warn("");
   }
 
+  // The trophy-set id is the stable identifier, so it wins where the sheet has
+  // one recorded. Names are the fallback, and the only option on the first run
+  // after this column appears.
+  const rowFor = (key, g) =>
+    (g.npComm && rowById.get(g.npComm)) || rowByKey.get(key);
+
+  const matched = new Set();
   for (const [key, g] of games) {
-    const existing = rowByKey.get(key);
+    const existing = rowFor(key, g);
     if (existing) {
+      matched.add(existing);
       pad(existing);
       setAuto(existing, g);
     }
   }
 
-  const newGames = [...games.entries()].filter(([k]) => !rowByKey.has(k));
+  // Rows left untouched are usually the far half of a pair that has just been
+  // merged under one identity. They are never deleted automatically — a row may
+  // carry notes you want — but they are worth naming.
+  const orphans = body.filter(
+    (r) => !matched.has(r) && norm(gameNameFromCell(r[gameCol]))
+  );
+  if (orphans.length) {
+    console.warn(
+      `\n${orphans.length} row(s) matched no game in this sync and were left ` +
+        `untouched. If a game now appears twice, this is the stale copy:`
+    );
+    for (const r of orphans.slice(0, 25)) {
+      console.warn(`  - ${gameNameFromCell(r[gameCol])}`);
+    }
+    if (orphans.length > 25) {
+      console.warn(`  ... and ${orphans.length - 25} more`);
+    }
+    console.warn("");
+  }
+
+  const newGames = [...games.entries()].filter(([k, g]) => !rowFor(k, g));
   newGames.sort((a, b) => (b[1].lastPlayed || "").localeCompare(a[1].lastPlayed || ""));
   const appended = newGames.map(([, g]) => {
     const r = pad([]);
@@ -625,14 +768,7 @@ const PRICE_FORMAT = process.env.PRICE_FORMAT || "0.00";
 
 const PLATINUM_BG = rgb(173, 216, 230); // light blue, the platinum convention
 
-// Trophy-grade colours for the header cells of the four trophy columns.
-// Platinum reuses the same light blue PlayStation itself uses for the grade.
-const TROPHY_COLORS = {
-  Bronze: rgb(205, 127, 50),
-  Silver: rgb(192, 192, 192),
-  Gold: rgb(255, 215, 0),
-  Platinum: PLATINUM_BG,
-};
+
 const PROGRESS_LOW = rgb(230, 124, 115);
 const PROGRESS_MID = rgb(255, 214, 102);
 const PROGRESS_HIGH = rgb(87, 187, 138);
@@ -676,6 +812,7 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
   sizeCol(PROGRESS_H, 50);
   sizeCol(PLAYTIME_H, 50);
   sizeCol("Hours to beat", 50);
+  sizeCol("PSN ID", 90);
   sizeCol("Trophies", 60);
   sizeCol("Plays", 50);
   sizeCol("First played", 75);
@@ -745,8 +882,9 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
   });
 
   // Tint each trophy column's header cell with its grade colour.
-  for (const [name, color] of Object.entries(TROPHY_COLORS)) {
-    styleCol(name, { backgroundColor: color }, ["backgroundColor"], 1, 2);
+  for (const t of TROPHY_COLUMNS) {
+    styleCol(t.header, { backgroundColor: rgb(...t.color) }, ["backgroundColor"], 1, 2);
+    styleCol(t.header, ...CENTER);
   }
 
   // Keep the header on screen while scrolling a few hundred rows.
@@ -851,7 +989,7 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
   }
 
   const progressCol = col(PROGRESS_H);
-  const platinumCol = col("Platinum");
+  const platinumCol = col("P");
   if (progressCol !== -1) {
     // No endRowIndex: the rules cover the whole column, including rows that
     // don't exist yet, so they never need revisiting as the library grows.
