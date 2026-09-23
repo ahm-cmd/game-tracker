@@ -70,7 +70,11 @@ const FALLBACK_TO_ICON = false;
 // before the missing-column check.
 const HEADER_RENAMES = {
   "Progress %": "%",
-  "Playtime (hrs)": "Hrs. Played",
+  "Playtime (hrs)": "Played",
+  "Hrs. Played": "Played",
+  "Hours to beat": "Est Hrs",
+  "Goal/Reminder": "Next Goal",
+  Hidden: "Hide",
   Bronze: "B",
   Silver: "S",
   Gold: "G",
@@ -78,7 +82,10 @@ const HEADER_RENAMES = {
 };
 
 const PROGRESS_H = "%";
-const PLAYTIME_H = "Hrs. Played";
+const PLAYTIME_H = "Played";
+const EST_H = "Est Hrs";
+const GOAL_H = "Next Goal";
+const HIDE_H = "Hide";
 
 const AUTO_HEADERS = [
   "Cover",
@@ -93,7 +100,7 @@ const AUTO_HEADERS = [
   "Trophies",
   PLAYTIME_H,
   "Plays",
-  "Hours to beat",
+  EST_H,
   "First played",
   "Last played",
   "PSN ID",
@@ -113,8 +120,8 @@ const PERSONAL_HEADERS = [
   "Rating",
   "Price paid",
   "Notes",
-  "Goal/Reminder",
-  "Hidden",
+  GOAL_H,
+  HIDE_H,
 ];
 const ALL_HEADERS = [...AUTO_HEADERS, ...PERSONAL_HEADERS];
 
@@ -152,13 +159,22 @@ const seriesTokens = (normalisedName) =>
     .split(/\s+/)
     .filter(Boolean);
 
-// Every number in a title, as a comparable string. Roman numerals count.
-const numbersIn = (tokens) =>
-  tokens
-    .map((t) => (/^\d{1,2}$/.test(t) ? Number(t) : ROMAN_TO_NUM[t] || null))
-    .filter((n) => n !== null)
-    .sort((a, b) => a - b)
-    .join(",");
+// Every number in a title, as a comparable string. Roman numerals count, and
+// digits glued into a word do too — "NBA 2K22" and "NBA 2K21" differ only
+// inside a single token, and reading neither as numbered would let them merge.
+// Runs of three or more digits are years or the like ("Anno 1800"), not entries
+// in a series, so they are ignored.
+const numbersIn = (tokens) => {
+  const found = [];
+  for (const t of tokens) {
+    if (ROMAN_TO_NUM[t]) {
+      found.push(ROMAN_TO_NUM[t]);
+      continue;
+    }
+    for (const m of t.matchAll(/(?<!\d)\d{1,2}(?!\d)/g)) found.push(Number(m[0]));
+  }
+  return found.sort((a, b) => a - b).join(",");
+};
 
 // Sony sometimes points a store entry at the wrong game's trophy set — Splitgate
 // Arena Reloaded resolves to Splitgate 2's — so a merge that would fold a sequel
@@ -213,11 +229,15 @@ function gameCell(name, conceptId) {
   return `=HYPERLINK("https://store.playstation.com/concept/${conceptId}", "${safe}")`;
 }
 
-// How the account has access to the game, as reported by PSN.
-function sourceLabel(service, purchased) {
-  if (service === "ps_plus") return "PS Plus";
-  if (service === "none_purchased") return "Purchased";
-  return purchased ? "Purchased" : "";
+// How the account has access to the game. Two PSN signals feed it: the played
+// list's service field, and the purchase list's membership field, which marks
+// a monthly PS Plus claim as distinct from a real purchase. Owning a game
+// outright beats having it through the subscription. Returns "" when PSN has
+// no record either way — disc copies, other accounts, PS3-era games.
+function sourceLabel(g) {
+  if (g.service === "none_purchased" || g.owned) return "Purchased";
+  if (g.service === "ps_plus" || g.plusClaim) return "PS Plus";
+  return "";
 }
 
 function durationToHours(iso) {
@@ -443,6 +463,12 @@ async function enrichPlayed(auth, games) {
       coverUrl: "",
       trophies: null,
     };
+    // When one game arrives under two names, show the plainer one. The trophy
+    // set is often named for a mode or an edition ("Fortnite: Save the World",
+    // "Control Ultimate Edition") where the store simply calls it "Fortnite".
+    if (t.name && entry.name && t.name.length < entry.name.length) {
+      entry.name = t.name;
+    }
     // A game can arrive as several PSN entries — a PS4 and a PS5 edition, say —
     // that all land on one row. Overwriting meant the last one seen won, so a
     // brief PS5 launch could bury a hundred hours logged on PS4. Accumulate
@@ -515,7 +541,8 @@ async function enrichPurchased(auth, games) {
         if (!key) continue;
         const existing = games.get(key);
         if (existing) {
-          existing.purchased = true;
+          if (t.membership === "PS_PLUS") existing.plusClaim = true;
+          else existing.owned = true;
           if (!existing.conceptId && t.concept && t.concept.id) {
             existing.conceptId = t.concept.id;
           }
@@ -534,7 +561,8 @@ async function enrichPurchased(auth, games) {
           iconUrl: "",
           coverUrl: pickCover(t),
           trophies: null,
-          purchased: true,
+          owned: t.membership !== "PS_PLUS",
+          plusClaim: t.membership === "PS_PLUS",
           conceptId: t.concept && t.concept.id ? t.concept.id : null,
         });
       }
@@ -546,7 +574,7 @@ async function enrichPurchased(auth, games) {
   }
 }
 
-// "Hours to beat" from HowLongToBeat (maintained library). Logs how many
+// Est Hrs from HowLongToBeat (maintained library). Logs how many
 // lookups actually succeeded, so a silent breakage is visible in the run log.
 async function enrichHltb(games, knownHours) {
   let attempted = 0;
@@ -665,7 +693,7 @@ async function readSheet(sheets) {
 function existingHoursMap(header, body) {
   const map = new Map();
   const gameCol = header.indexOf("Game");
-  const hoursCol = header.indexOf("Hours to beat");
+  const hoursCol = header.indexOf(EST_H);
   if (hoursCol === -1) return map;
   for (const r of body) {
     const key = norm(gameNameFromCell(r[gameCol]));
@@ -689,7 +717,8 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
     row[idx["Game"]] = gameCell(g.name, g.conceptId);
     row[idx["Platform"]] = g.platform || "";
     if (idx["Source"] !== -1) {
-      row[idx["Source"]] = sourceLabel(g.service, g.purchased);
+      const label = sourceLabel(g);
+      if (label) row[idx["Source"]] = label;
     }
     row[idx[PROGRESS_H]] = typeof g.progress === "number" ? g.progress : 0;
     row[idx[PLAYTIME_H]] = g.playtime ?? "";
@@ -708,9 +737,9 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
     }
     // PSN's own hidden flag ticks the box but never unties it. Hiding a game in
     // the sheet is your decision, and PSN not hiding it is no reason to undo it.
-    if (idx["Hidden"] !== -1 && g.hidden) {
-      const current = String(row[idx["Hidden"]] ?? "").trim().toUpperCase();
-      if (current !== "TRUE") row[idx["Hidden"]] = true;
+    if (idx[HIDE_H] !== -1 && g.hidden) {
+      const current = String(row[idx[HIDE_H]] ?? "").trim().toUpperCase();
+      if (current !== "TRUE") row[idx[HIDE_H]] = true;
     }
     for (const t of TROPHY_COLUMNS) {
       const i = idx[t.header];
@@ -719,7 +748,7 @@ async function writeSheet(sheets, spreadsheetId, header, body, games) {
       row[i] = typeof v === "number" ? v : "";
     }
     if (g.hoursToBeat !== undefined && g.hoursToBeat !== "") {
-      row[idx["Hours to beat"]] = g.hoursToBeat;
+      row[idx[EST_H]] = g.hoursToBeat;
     }
     const existingCover = row[idx["Cover"]];
     if (g.coverUrl) {
@@ -903,8 +932,9 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
   sizeCol("Platform", PLATFORM_W);
   sizeCol("Sort order", 70);
   sizeCol(PROGRESS_H, 50);
-  sizeCol(PLAYTIME_H, 50);
-  sizeCol("Hours to beat", 50);
+  sizeCol(PLAYTIME_H, 75);
+  sizeCol(EST_H, 75);
+  sizeCol(HIDE_H, 60);
   sizeCol("PSN ID", 90);
   sizeCol("Trophies", 60);
   sizeCol("Plays", 50);
@@ -948,12 +978,12 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
 
   styleCol(PROGRESS_H, ...CENTER);
   styleCol(PLAYTIME_H, ...CENTER);
-  styleCol("Hours to beat", ...CENTER);
+  styleCol(EST_H, ...CENTER);
   styleCol("Trophies", ...CENTER);
   styleCol("Plays", ...CENTER);
   styleCol("Game", ...WRAP);
   styleCol("Notes", ...WRAP);
-  styleCol("Goal/Reminder", ...WRAP);
+  styleCol(GOAL_H, ...WRAP);
 
   // Platform is a 25px column, so the label is turned on its side to fit.
   styleCol(
@@ -1180,7 +1210,7 @@ async function applyFormatting(sheets, spreadsheetId, sheetId, header, dataRowCo
 
   // Hidden is a checkbox. Ticking it drops the row out of the view via the
   // filter below; untick it, or clear the filter, to get the row back.
-  const hiddenCol = col("Hidden");
+  const hiddenCol = col(HIDE_H);
   if (hiddenCol !== -1) {
     requests.push({
       setDataValidation: {
